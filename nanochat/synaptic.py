@@ -464,7 +464,7 @@ class SynapticCausalSelfAttention(nn.Module):
         dtype = x.dtype
         q = self.q_proj(x)
         k = self.k_proj(x)
-        v = self.v_proj(x)
+        v = self.v_proj(x).view(B, T, self.n_kv_head, D)
         T0 = 0 if kv_cache is None else kv_cache.get_pos()
         q = self._apply_rope(q, T0)
         k = self._apply_rope(k, T0)
@@ -490,7 +490,7 @@ class SynapticCausalSelfAttention(nn.Module):
         P = F.softmax(aug_logits, dim=-1)
         P = self.attn_drop(P)
 
-        ctx = torch.einsum("bhts,bhsd->bhtd", P, v)  # (B,H,T,D)
+        ctx = torch.matmul(P.to(v.dtype), v)
         y = ctx.transpose(1, 2).contiguous().view(B, T, H * D)
         y = self.resid_drop(self.o_proj(y))
         return y, presyn_state
@@ -605,6 +605,8 @@ class SynapticMoE(nn.Module):
                 for _ in range(num_experts)
             ]
         )
+        # Projects token features into router embedding space for alignment bias
+        self.router_probe = nn.Linear(n_embd, cfg.router_embed_dim, bias=False)
         self.register_buffer("fatigue", torch.zeros(num_experts))
         self.register_buffer("energy", torch.ones(num_experts))
         # Router embeddings (biological identity) with unit-norm constraint
@@ -658,15 +660,15 @@ class SynapticMoE(nn.Module):
         
         logits = self.router(x)  # (B,T,E)
         # Embed-token similarity (optional small bias from router embeddings)
-        # We synthesize a token embedding proxy by pooling x and projecting onto router embeddings
         tok_proxy = x.mean(dim=-1, keepdim=True)  # (B,T,1)
-        bias = (
-            0.02
-            * _cosine(self.router_embeddings, self.router_embeddings)
-            .diag()
-            .view(1, 1, -1)
-            * tok_proxy
-        )
+        base_bias = 0.02 * tok_proxy.expand(-1, -1, E)
+        router_gain = self.router_embeddings.norm(dim=-1).view(1, 1, -1)  # (1,1,E)
+        gain_bias = 0.02 * tok_proxy * router_gain
+        probe_feat = self.router_probe(x)  # (B,T,dim)
+        tok_unit = F.normalize(probe_feat, dim=-1)
+        router_unit = F.normalize(self.router_embeddings, dim=-1)
+        align_bias = 0.02 * torch.einsum("btd,ed->bte", tok_unit, router_unit)
+        bias = base_bias + gain_bias + align_bias
         logits = (
             logits
             + bias
@@ -739,6 +741,7 @@ class SynapticMoE(nn.Module):
             push = (1.0 - cooc) * (sim + 0.3) * self.cfg.router_contrastive_push
             grad = pull - push
             grad = grad - grad.mean()  # center
+            grad = grad.to(emb.dtype)
             delta = (grad @ emb) * self.cfg.router_contrastive_lr
             emb = emb - delta
             emb = emb / (emb.norm(dim=-1, keepdim=True) + 1e-8)
