@@ -11,10 +11,9 @@
 
 import torch
 import torch.nn as nn
-import numpy as np
-from typing import Dict, List, Tuple, Optional, Any
-from dataclasses import dataclass, field
-from .synaptic import SynapticMoE, SynapticConfig
+from typing import Dict, Any
+from dataclasses import dataclass
+from .synaptic import SynapticMoE
 
 Tensor = torch.Tensor
 

@@ -589,7 +589,7 @@ def test_training_performance(enwik8_large):
     assert hf_train_time > 0, "Training should take some time"
 
     # Print comparison
-    print(f"\n📊 Performance comparison:")
+    print("\n📊 Performance comparison:")
     print(f"   RustBPE: {rustbpe_train_time:.4f}s")
     print(f"   HuggingFace: {hf_train_time:.4f}s")
     print(f"   Speedup: {hf_train_time/rustbpe_train_time:.2f}x")

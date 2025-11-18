@@ -162,7 +162,8 @@ def mid_data_generator(split):
         yield inputs, targets
 
 train_loader = mid_data_generator("train")
-build_val_loader = lambda: mid_data_generator("val")
+def build_val_loader():
+    return mid_data_generator("val")
 progress = 0 # will go from 0 to 1 over the course of the epoch
 
 # Learning rate scheduler

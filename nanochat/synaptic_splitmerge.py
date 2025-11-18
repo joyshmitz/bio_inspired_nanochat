@@ -92,7 +92,7 @@ def _cosine(a: Tensor, b: Tensor, eps: float = 1e-8) -> Tensor:
 @torch.no_grad()
 def _orthogonal_perturb_like(vec: Tensor, noise_scale: float) -> Tensor:
     """Return a unit-length vector: normalized(vec + noise in orthogonal subspace)."""
-    d = vec.shape[-1]
+    vec.shape[-1]
     noise = torch.randn_like(vec)
     proj = (noise * vec).sum(dim=-1, keepdim=True) * vec
     tangent = noise - proj

@@ -195,7 +195,7 @@ RED = '\033[91m'
 RESET = '\033[0m'
 
 # Print vocab sizes
-print(f"\nVocab sizes:")
+print("\nVocab sizes:")
 print(f"GPT-2: {vocab_sizes['gpt2']}")
 print(f"GPT-4: {vocab_sizes['gpt4']}")
 print(f"Ours: {vocab_sizes['ours']}")

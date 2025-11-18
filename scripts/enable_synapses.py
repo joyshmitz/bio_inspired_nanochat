@@ -1,7 +1,8 @@
 # scripts/enable_synapses.py
 # Helper to create and checkpoint a synaptic model (with optional MoE)
 
-import argparse, torch
+import argparse
+import torch
 from nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig
 from nanochat.synaptic import SynapticConfig
 from nanochat.checkpoint_manager import save_checkpoint

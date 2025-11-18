@@ -24,7 +24,7 @@ import os
 import json
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, cast, Any
+from typing import Dict, List, Optional, Tuple, cast
 
 import numpy as np
 import torch

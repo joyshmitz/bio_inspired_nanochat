@@ -8,12 +8,8 @@
 # -----------------------------------------------------------------------------
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import os
 import shutil
-import time
-import numpy as np
 
 from typing import cast
 from nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig, Block

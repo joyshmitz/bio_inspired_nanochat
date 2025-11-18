@@ -17,7 +17,6 @@ Usage:
 """
 
 import math
-import time
 from typing import Dict
 
 import numpy as np
@@ -341,7 +340,7 @@ def main():
     
     # Print formatted best configuration
     best_syntax = Syntax(
-        f"best_config = SynapticConfig(\n" + 
+        "best_config = SynapticConfig(\n" + 
         "\n".join([f"    {k}={v:.4f}," for k,v in best_params.items()]) + 
         "\n)",
         "python",

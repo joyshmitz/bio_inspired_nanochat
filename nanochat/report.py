@@ -354,7 +354,7 @@ class Report:
             else:
                 out_file.write("Total wall clock time: unknown\n")
         # also cp the report.md file to current directory
-        print(f"Copying report.md to current directory for convenience")
+        print("Copying report.md to current directory for convenience")
         shutil.copy(report_file, "report.md")
         return report_file
 
