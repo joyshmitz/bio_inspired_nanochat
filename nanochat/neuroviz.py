@@ -24,7 +24,7 @@ import os
 import json
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, cast, Any
 
 import numpy as np
 import torch
@@ -93,7 +93,8 @@ def _reduce_camkii(expert: SynapticExpert) -> float:
     vals = []
     for fc in (expert.fc1, expert.fc2):
         if hasattr(fc, "post") and hasattr(fc.post, "camkii"):
-            vals.append(float(fc.post.camkii.item()))
+            t = cast(torch.Tensor, fc.post.camkii)
+            vals.append(float(t.item()))
     return float(np.mean(vals)) if vals else 0.0
 
 
@@ -101,7 +102,8 @@ def _reduce_mgate(expert: SynapticExpert) -> float:
     vals = []
     for fc in (expert.fc1, expert.fc2):
         if hasattr(fc, "post") and hasattr(fc.post, "m_gate"):
-            vals.append(float(fc.post.m_gate.item()))
+            t = cast(torch.Tensor, fc.post.m_gate)
+            vals.append(float(t.item()))
     return float(np.mean(vals)) if vals else 0.0
 
 
@@ -109,11 +111,14 @@ def _reduce_elig_norm(expert: SynapticExpert) -> float:
     vals = []
     for fc in (expert.fc1, expert.fc2):
         if hasattr(fc, "post"):
+            u = cast(torch.Tensor, fc.post.U)
+            v = cast(torch.Tensor, fc.post.V)
+            h = cast(torch.Tensor, fc.post.H_fast)
             vals.append(
                 float(
-                    fc.post.U.norm().item()
-                    + fc.post.V.norm().item()
-                    + fc.post.H_fast.norm().item()
+                    u.norm().item()
+                    + v.norm().item()
+                    + h.norm().item()
                 )
             )
     return float(np.mean(vals)) if vals else 0.0
@@ -121,7 +126,8 @@ def _reduce_elig_norm(expert: SynapticExpert) -> float:
 
 def _weight_energy_util(energy: np.ndarray, fatigue: np.ndarray) -> np.ndarray:
     energy = np.clip(energy, 0.0, 1.0)
-    util = 1.0 - np.clip(_to_np(fatigue), 0.0, 1.0)
+    # fatigue is already ndarray here based on usage in _layer_metrics
+    util = 1.0 - np.clip(fatigue, 0.0, 1.0)
     return energy * util
 
 
@@ -349,6 +355,45 @@ class NeuroVizManager:
                 return nm
         return None
 
+    @torch.no_grad()
+    def _layer_metrics(self, moe: SynapticMoE) -> Dict[str, np.ndarray]:
+        emb = _to_np(cast(torch.Tensor, moe.router_embeddings))  # (E, D)
+        fatigue = _to_np(cast(torch.Tensor, moe.fatigue))  # (E,)
+        energy = _to_np(cast(torch.Tensor, moe.energy))  # (E,)
+        util = 1.0 - np.clip(fatigue, 0.0, 1.0)  # util proxy
+        health = _weight_energy_util(energy, fatigue)
+
+        # expert-specific reductions
+        mgate, camkii, elig = [], [], []
+        for e in moe.experts:
+            e = cast(SynapticExpert, e)
+            mgate.append(_reduce_mgate(e))
+            camkii.append(_reduce_camkii(e))
+            elig.append(_reduce_elig_norm(e))
+
+        mgate_arr = np.asarray(mgate, dtype=np.float32)
+        camkii_arr = np.asarray(camkii, dtype=np.float32)
+        elig_arr = np.asarray(elig, dtype=np.float32)
+
+        # “quantal proxy”: weight norms of slow+fast in fc2 (downstream)
+        qprox = []
+        for e in moe.experts:
+            e = cast(SynapticExpert, e)
+            s = float(e.fc2.w_slow.norm().item() + e.fc2.w_fast.norm().item())
+            qprox.append(s)
+        qprox_arr = np.asarray(qprox, dtype=np.float32)
+
+        return dict(
+            embedding=emb,
+            util=util,
+            energy=energy,
+            health=health,
+            mgate=mgate_arr,
+            camkii=camkii_arr,
+            elig=elig_arr,
+            qprox=qprox_arr,
+        )
+
     # ------------------------- per-step logging ---------------------
 
     def step(self, model: nn.Module, step: int, loss: Optional[torch.Tensor] = None):
@@ -361,41 +406,27 @@ class NeuroVizManager:
             self.score.step(model, loss, step)
 
         # TensorBoard scalars/hists
-        fatigue = _to_np(moe.fatigue)  # (E,)
-        energy = _to_np(moe.energy)  # (E,)
-        util = 1.0 - np.clip(fatigue, 0.0, 1.0)  # util proxy
-        health = _weight_energy_util(energy, fatigue)
+        if self.tb is not None and step - self._last_tb >= self.cfg.tb_every:
+            for name, moe in self.layers:
+                self._log_tb_layer(name, moe, step)
+            self._last_tb = step
 
-        # expert-specific reductions
-        mgate, camkii, elig = [], [], []
-        for e in moe.experts:
-            mgate.append(_reduce_mgate(e))
-            camkii.append(_reduce_camkii(e))
-            elig.append(_reduce_elig_norm(e))
+        # Static images
+        if self.cfg.save_pngs and step - self._last_img >= self.cfg.image_every:
+            for name, moe in self.layers:
+                self._write_images(name, moe, step)
+                self.lineage.render_timeline_png(name, step)
+            self._last_img = step
 
-        mgate = np.asarray(mgate, dtype=np.float32)
-        camkii = np.asarray(camkii, dtype=np.float32)
-        elig = np.asarray(elig, dtype=np.float32)
-
-        # “quantal proxy”: weight norms of slow+fast in fc2 (downstream)
-        qprox = []
-        for e in moe.experts:
-            s = float(e.fc2.w_slow.norm().item() + e.fc2.w_fast.norm().item())
-            qprox.append(s)
-        qprox = np.asarray(qprox, dtype=np.float32)
-
-        emb = _to_np(moe.router_embeddings)
-
-        return dict(
-            embedding=emb,
-            util=util,
-            energy=energy,
-            health=health,
-            mgate=mgate,
-            camkii=camkii,
-            elig=elig,
-            qprox=qprox,
-        )
+        # Optional interactive HTML
+        if (
+            self.cfg.write_interactive_html
+            and _HAS_PLOTLY
+            and step - self._last_html >= self.cfg.interactive_every
+        ):
+            for name, moe in self.layers:
+                self.lineage.render_interactive_html(name, step)
+            self._last_html = step
 
     # ------------------------- TensorBoard writers ------------------
 
@@ -529,6 +560,6 @@ class NeuroVizManager:
             ax.set_title(key)
             ax.grid(True, alpha=0.2)
         fig.suptitle(f"{name} distributions @ {step:,}")
-        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        fig.tight_layout(rect=(0, 0, 1, 0.95))
         fig.savefig(os.path.join(outdir, f"{name}_hists_{step:09d}.png"), dpi=140)
         plt.close(fig)

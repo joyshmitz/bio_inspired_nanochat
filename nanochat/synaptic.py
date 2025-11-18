@@ -20,7 +20,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, cast
 
 import torch
 import torch.nn as nn
@@ -724,17 +724,22 @@ class StructuralPlasticity(nn.Module):
 
     @torch.no_grad()
     def step(self, used: Tensor):
-        self.age.add_(1.0)
-        self.util.mul_(1.0 - self.cfg.structural_tau_util).add_(
+        age = cast(Tensor, self.age)
+        age.add_(1.0)
+        util = cast(Tensor, self.util)
+        # Explicitly cast float to Tensor for in-place ops to satisfy strict type checkers
+        util.mul_(1.0 - self.cfg.structural_tau_util).add_(
             self.cfg.structural_tau_util * used.float()
         )
 
     @torch.no_grad()
     def decision(self):
+        util = cast(Tensor, self.util)
+        age = cast(Tensor, self.age)
         s = torch.sigmoid(
-            10.0 * (self.util - 0.2)
+            10.0 * (util - 0.2)
             - self.cfg.structural_age_bias
-            * (self.age / float(self.cfg.structural_interval))
+            * (age / float(self.cfg.structural_interval))
         )
         return (torch.rand_like(s) > s).item()
 
@@ -745,6 +750,7 @@ def structural_plasticity_step(
     if cfg.structural_interval < 1 or global_step % cfg.structural_interval != 0:
         return
     for st in expert_states:
+        st = cast(StructuralPlasticity, st)
         st.step(used=torch.tensor(1.0))
         if st.decision():
             for p in st.parameters():

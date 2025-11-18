@@ -18,7 +18,7 @@
 #   ctrl.step(global_step, optimizer=opt)    # call periodically (e.g. every 50k steps)
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Iterable, Any
+from typing import List, Tuple, Optional, Iterable, Any, cast
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -143,14 +143,14 @@ def _copy_synaptic_linear_(dst: SynapticLinear, src: SynapticLinear):
     dst.w_slow.copy_(src.w_slow)
     dst.w_fast.copy_(src.w_fast)
     if (dst.bias is not None) and (src.bias is not None):
-        dst.bias.copy_(src.bias)
+        cast(Tensor, dst.bias).copy_(cast(Tensor, src.bias))
     # postsyn state
-    dst.post.U.copy_(src.post.U)
-    dst.post.V.copy_(src.post.V)
-    dst.post.H_fast.copy_(src.post.H_fast)
-    dst.post.m_gate.copy_(src.post.m_gate)
-    dst.post.camkii.copy_(src.post.camkii)
-    dst.post.pp1.copy_(src.post.pp1)
+    cast(Tensor, dst.post.U).copy_(cast(Tensor, src.post.U))
+    cast(Tensor, dst.post.V).copy_(cast(Tensor, src.post.V))
+    cast(Tensor, dst.post.H_fast).copy_(cast(Tensor, src.post.H_fast))
+    cast(Tensor, dst.post.m_gate).copy_(cast(Tensor, src.post.m_gate))
+    cast(Tensor, dst.post.camkii).copy_(cast(Tensor, src.post.camkii))
+    cast(Tensor, dst.post.pp1).copy_(cast(Tensor, src.post.pp1))
 
 
 @torch.no_grad()
@@ -159,14 +159,14 @@ def _merge_linear_into_(winner: SynapticLinear, loser: SynapticLinear, alpha: fl
     winner.w_slow.mul_(alpha).add_((1.0 - alpha) * loser.w_slow)
     winner.w_fast.mul_(alpha).add_((1.0 - alpha) * loser.w_fast)
     if (winner.bias is not None) and (loser.bias is not None):
-        winner.bias.mul_(alpha).add_((1.0 - alpha) * loser.bias)
-    winner.post.U.mul_(alpha).add_((1.0 - alpha) * loser.post.U)
-    winner.post.V.mul_(alpha).add_((1.0 - alpha) * loser.post.V)
-    winner.post.H_fast.mul_(alpha).add_((1.0 - alpha) * loser.post.H_fast)
+        cast(Tensor, winner.bias).mul_(alpha).add_((1.0 - alpha) * cast(Tensor, loser.bias))
+    cast(Tensor, winner.post.U).mul_(alpha).add_((1.0 - alpha) * cast(Tensor, loser.post.U))
+    cast(Tensor, winner.post.V).mul_(alpha).add_((1.0 - alpha) * cast(Tensor, loser.post.V))
+    cast(Tensor, winner.post.H_fast).mul_(alpha).add_((1.0 - alpha) * cast(Tensor, loser.post.H_fast))
     # gate and enzymes: bias toward winner (more stable)
-    winner.post.m_gate.mul_(0.9).add_(0.1 * loser.post.m_gate)
-    winner.post.camkii.mul_(0.9).add_(0.1 * loser.post.camkii)
-    winner.post.pp1.mul_(0.9).add_(0.1 * loser.post.pp1)
+    cast(Tensor, winner.post.m_gate).mul_(0.9).add_(0.1 * cast(Tensor, loser.post.m_gate))
+    cast(Tensor, winner.post.camkii).mul_(0.9).add_(0.1 * cast(Tensor, loser.post.camkii))
+    cast(Tensor, winner.post.pp1).mul_(0.9).add_(0.1 * cast(Tensor, loser.post.pp1))
 
 
 @torch.no_grad()
@@ -175,11 +175,11 @@ def _clone_linear_from_(dst: SynapticLinear, src: SynapticLinear, noise_scale: f
     _add_noise_(dst.w_slow, noise_scale)
     _add_noise_(dst.w_fast, noise_scale)
     if dst.bias is not None:
-        _add_noise_(dst.bias, noise_scale)
+        _add_noise_(cast(Tensor, dst.bias), noise_scale)
     # reset fast Hebbian traces for cloned expert
-    dst.post.H_fast.zero_()
-    dst.post.U.mul_(0.5)
-    dst.post.V.mul_(0.5)  # keep some eligibility but dampen
+    cast(Tensor, dst.post.H_fast).zero_()
+    cast(Tensor, dst.post.U).mul_(0.5)
+    cast(Tensor, dst.post.V).mul_(0.5)  # keep some eligibility but dampen
 
 
 @torch.no_grad()
@@ -219,8 +219,10 @@ def _merge_expert_into_and_clone_(
     emb[loser_idx : loser_idx + 1].copy_(e_l)
 
     # 5) Reset stats
-    layer.fatigue[loser_idx] = 0.0
-    layer.energy[loser_idx] = 1.0
+    fatigue = cast(Tensor, layer.fatigue)
+    energy = cast(Tensor, layer.energy)
+    fatigue[loser_idx] = 0.0
+    energy[loser_idx] = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -248,8 +250,8 @@ class SplitMergeController:
     @torch.no_grad()
     def _health(self, layer: SynapticMoE) -> Tensor:
         # Higher is better: combine (1 - fatigue) with energy in [0,1]
-        fat = layer.fatigue.clamp(0, 1)  # EMA utilization proxy
-        eng = layer.energy.clamp(0, 1)
+        fat = cast(Tensor, layer.fatigue).clamp(0, 1)  # EMA utilization proxy
+        eng = cast(Tensor, layer.energy).clamp(0, 1)
         health = (1.0 - fat) * (0.5 + 0.5 * eng)  # [0,1]
         return health
 
@@ -258,8 +260,9 @@ class SplitMergeController:
         if not self.cfg.use_util_weighting:
             return 0.6  # mild bias toward first arg
         # invert fatigue → utilization proxy
-        u_i = (1.0 - layer.fatigue[i]).clamp(0, 1)
-        u_j = (1.0 - layer.fatigue[j]).clamp(0, 1)
+        fat = cast(Tensor, layer.fatigue)
+        u_i = (1.0 - fat[i]).clamp(0, 1)
+        u_j = (1.0 - fat[j]).clamp(0, 1)
         s = (u_i + u_j).clamp_min(1e-6)
         return float((u_i / s).item())
 
