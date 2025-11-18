@@ -216,7 +216,12 @@ class Engine:
             **kv_model_kwargs,
         )
         ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        logits = self.model.forward(ids, kv_cache=kv_cache_prefill)
+        result = self.model.forward(ids, kv_cache=kv_cache_prefill)
+        # Handle both GPT (returns logits) and GPTSynaptic (returns (logits, None))
+        if isinstance(result, tuple):
+            logits, _ = result
+        else:
+            logits = result
         logits = logits[:, -1, :]
         next_ids = sample_next_token(logits, rng, temperature, top_k)  # (B, 1)
         sampled_tokens = next_ids[:, 0].tolist()
@@ -253,7 +258,12 @@ class Engine:
                 first_iteration = False
             else:
                 # Forward the model and get the next token for each row
-                logits = self.model.forward(ids, kv_cache=kv_cache_decode)  # (B, T, vocab_size)
+                result = self.model.forward(ids, kv_cache=kv_cache_decode)  # (B, T, vocab_size) or (logits, None)
+                # Handle both GPT (returns logits) and GPTSynaptic (returns (logits, None))
+                if isinstance(result, tuple):
+                    logits, _ = result
+                else:
+                    logits = result
                 logits = logits[:, -1, :]  # (B, vocab_size) at last time step
                 next_ids = sample_next_token(logits, rng, temperature, top_k)  # (B, 1)
                 sampled_tokens = next_ids[:, 0].tolist()

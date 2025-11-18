@@ -94,6 +94,8 @@ def build_model(checkpoint_dir, step, device, phase):
     # Check if this is a synaptic model
     if meta_data.get("synapses", False):
         assert GPTSynaptic is not None, "gpt_synaptic not found but synapses=True in metadata"
+        from nanochat.synaptic import SynapticConfig
+        syn_cfg = SynapticConfig()  # Use defaults; could load from meta_data if saved
         model_config = GPTSynapticConfig(
             sequence_len=model_config_kwargs["sequence_len"],
             vocab_size=model_config_kwargs["vocab_size"],
@@ -101,6 +103,7 @@ def build_model(checkpoint_dir, step, device, phase):
             n_head=model_config_kwargs["n_head"],
             n_kv_head=model_config_kwargs.get("n_kv_head", model_config_kwargs["n_head"]),
             n_embd=model_config_kwargs["n_embd"],
+            syn_cfg=syn_cfg,
         )
         with torch.device("meta"):
             model = GPTSynaptic(model_config)

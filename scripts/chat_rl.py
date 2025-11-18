@@ -21,6 +21,7 @@ import itertools
 import re
 import wandb
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
 
 from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, DummyWandb
@@ -258,7 +259,17 @@ for step in range(num_steps):
             advantages = advantages_all[b0:b1]
             # Calculate log probabilities. Note that the loss calculates NLL = -logp, so we negate
             with autocast_ctx:
-                logp = -model(inputs, targets, loss_reduction='none').view_as(inputs) # (B, T)
+                # Handle both GPT and GPTSynaptic signatures
+                if hasattr(model, 'config') and getattr(model.config, 'synapses', False):
+                    # GPTSynaptic: forward returns (logits, loss), need to compute loss ourselves
+                    logits, _ = model(inputs, targets, train_mode=True)
+                    logits_flat = logits.view(-1, logits.size(-1))
+                    targets_flat = targets.view(-1)
+                    loss_per_token = F.cross_entropy(logits_flat, targets_flat, reduction='none', ignore_index=-1)
+                    logp = -loss_per_token.view_as(inputs)
+                else:
+                    # GPT: forward accepts loss_reduction='none'
+                    logp = -model(inputs, targets, loss_reduction='none').view_as(inputs) # (B, T)
             # Calculate the PG objective. Note that ignore_index=-1 ensures that invalid tokens have loss 0.
             pg_obj = (logp * advantages.unsqueeze(-1)).sum()
             # normalize by the number of valid tokens, number of passes, and examples_per_rank

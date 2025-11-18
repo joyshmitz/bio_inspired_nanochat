@@ -37,12 +37,35 @@ assert split_tokens % tokens_per_step == 0, "split_tokens must be divisible by t
 steps = split_tokens // tokens_per_step
 token_bytes = get_token_bytes(device=device)
 bpb_results = {}
+# Handle GPTSynaptic return signature for evaluate_bpb
+is_synaptic = hasattr(model, 'config') and getattr(model.config, 'synapses', False)
+if is_synaptic:
+    import torch.nn.functional as F
+    orig_forward = model.forward
+    def syn_forward_wrapper(idx, targets=None, kv_cache=None, loss_reduction='mean', **kwargs):
+        if targets is not None:
+            logits, loss = orig_forward(idx, targets, kv_cache, train_mode=False)
+            if loss_reduction == 'none':
+                logits_flat = logits.view(-1, logits.size(-1))
+                targets_flat = targets.view(-1)
+                loss_per_token = F.cross_entropy(logits_flat, targets_flat, reduction='none', ignore_index=-1)
+                return loss_per_token.view(targets.shape)
+            return loss
+        else:
+            logits, _ = orig_forward(idx, None, kv_cache, train_mode=False)
+            return logits
+    model.forward = syn_forward_wrapper
+
 for split_name in ["train", "val"]:
     loader = tokenizing_distributed_data_loader(device_batch_size, sequence_len, split_name, device=device)
     with autocast_ctx:
         bpb = evaluate_bpb(model, loader, steps, token_bytes)
     print0(f"{split_name} bpb: {bpb:.4f}")
     bpb_results[split_name] = bpb
+
+# Restore original forward if we wrapped it
+if is_synaptic:
+    model.forward = orig_forward
 
 # Master process also samples from the model
 samples = []

@@ -126,9 +126,17 @@ class ModelWrapper:
         self.max_seq_len = max_seq_len
 
     def __call__(self, input_ids):
-        outputs = self.model(input_ids)
-        logits = outputs.logits
-        return logits
+        result = self.model(input_ids)
+        # Handle both GPT (returns logits) and GPTSynaptic (returns (logits, None))
+        if isinstance(result, tuple):
+            logits, _ = result
+        else:
+            logits = result
+        # Wrap in a simple object for compatibility with HuggingFace-style access
+        class LogitsWrapper:
+            def __init__(self, logits):
+                self.logits = logits
+        return LogitsWrapper(logits)
 
 def load_hf_model(hf_path: str, device):
     print0(f"Loading model from: {hf_path}")
