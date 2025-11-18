@@ -1,9 +1,9 @@
 [project]
-name = "nanochat"
+name = "bio-inspired-nanochat"
 version = "0.1.0"
 description = "the minimal full-stack ChatGPT clone"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.14,<3.15"
 dependencies = [
     "datasets>=4.0.0",
     "fastapi>=0.117.1",
@@ -17,13 +17,13 @@ dependencies = [
     "pyyaml>=6.0.0",
     "regex>=2025.9.1",
     "requests>=2.31.0",
+    "rich>=13.7.0",
     "setuptools>=80.9.0",
     "tensorboard>=2.16.0",
     "tiktoken>=0.11.0",
     "tokenizers>=0.22.0",
     "torch>=2.8.0",
     "transformers>=4.40.0",
-    "umap-learn>=0.5.5",
     "uvicorn>=0.36.0",
     "wandb>=0.21.3",
 ]
@@ -78,8 +78,10 @@ gpu = [
     "torch>=2.8.0",  
 ]
 viz = [
+    "cma>=3.2.2",
     "plotly>=5.18.0",
     "scikit-learn>=1.4.0",
+    "umap-learn>=0.5.5",
 ]  
   
 [tool.uv]  
