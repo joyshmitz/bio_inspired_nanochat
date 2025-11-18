@@ -416,8 +416,9 @@ class SynapticCausalSelfAttention(nn.Module):
         H = self.n_head if x.size(-1) == self.n_head * self.head_dim else self.n_kv_head
         D = self.head_dim
         x = x.view(x.size(0), x.size(1), H, D)
-        cos = self.cos[:, T0 : T0 + x.size(1), : D // 2]
-        sin = self.sin[:, T0 : T0 + x.size(1), : D // 2]
+        # self.cos is on bfloat16, but might be on different device if not properly moved
+        cos = self.cos[:, T0 : T0 + x.size(1), : D // 2].to(x.device).unsqueeze(2)
+        sin = self.sin[:, T0 : T0 + x.size(1), : D // 2].to(x.device).unsqueeze(2)
         x1, x2 = x.split(D // 2, dim=-1)
         xr = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
         return xr

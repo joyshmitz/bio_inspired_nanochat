@@ -355,6 +355,10 @@ class NeuroVizManager:
                 return nm
         return None
 
+    def close(self):
+        if self.tb is not None:
+            self.tb.close()
+
     @torch.no_grad()
     def _layer_metrics(self, moe: SynapticMoE) -> Dict[str, np.ndarray]:
         emb = _to_np(cast(torch.Tensor, moe.router_embeddings))  # (E, D)

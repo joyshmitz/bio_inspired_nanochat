@@ -4,7 +4,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from .synaptic import (
@@ -31,7 +31,7 @@ class GPTSynapticConfig:
     n_embd: int = 1280
     rope_base: float = 10000.0
     synapses: bool = True
-    syn_cfg: SynapticConfig = SynapticConfig()
+    syn_cfg: SynapticConfig = field(default_factory=SynapticConfig)
     dropout: float = 0.0
     # MoE & structural options
     use_moe: bool = False
