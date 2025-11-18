@@ -75,6 +75,40 @@ graph TD
 
 ---
 
+## 🔬 Deep Dive: The Math of the Synapse
+
+For the researchers, here are the governing equations implemented in `synaptic.py`.
+
+### 1. Calcium Dynamics (The Integrator)
+Calcium $C$ acts as a leaky integrator of the incoming attention signal (Logits $L$). It represents the "excitement" of the synapse.
+
+$$ C_{t} = \alpha_{ca} \cdot \text{softplus}(L_t) + (1 - 1/\tau_c) \cdot C_{t-1} $$
+
+### 2. The Release Probability (The Gate)
+The probability $P_{release}$ that a vesicle is actually released depends on the Calcium level (detected by Synaptotagmin) versus the clamp (Complexin).
+
+$$ P_{release} = \sigma(3 \cdot \text{Syt}(C) + 2 \cdot P_{primed} - 2 \cdot \text{Complexin}) \cdot \sigma(\text{Logits}) $$
+
+Where $\text{Syt}(C)$ is a Hill equation modeling the calcium sensor's sensitivity:
+$$ \text{Syt}(C) = \frac{C}{C + K_d} $$
+
+### 3. Vesicle Depletion (The Limiter)
+The actual synaptic weight $W_{eff}$ is limited by the available vesicles in the Readily Releasable Pool ($RRP$).
+
+$$ W_{eff} = \min(P_{release}, RRP_t) $$
+$$ RRP_{t+1} = RRP_t - W_{eff} + \text{RefillRate} $$
+
+This non-linear clamping is what physically enforces the frequency penalty.
+
+### 4. Hebbian Learning (The Fast Weight)
+The postsynaptic weight update follows a gated Hebbian rule. We maintain low-rank eligibility traces $U, V$.
+
+$$ \Delta W_{fast} = \eta \cdot (U \cdot V^T) \cdot \underbrace{\sigma(\text{CaMKII} - \text{PP1})}_{\text{Consolidation Gate}} $$
+
+The gate opens only when CaMKII (Write signal) > PP1 (Erase signal).
+
+---
+
 ## 🔬 Biological Parameter Reference
 
 Every aspect of the synapse can be tuned via `SynapticConfig`. These parameters act as the "genome" of the artificial brain.
@@ -192,6 +226,10 @@ tensorboard --logdir runs/
 *   **`nanochat/synaptic_splitmerge.py`** 👼 **The God Hand**: The controller that pauses training to perform surgery (splitting/merging experts).
 *   **`nanochat/gpt_synaptic.py`** 🏗️ **The Body**: The Transformer skeleton that holds the synaptic organs.
 *   **`nanochat/neuroviz.py`** 📸 **The MRI**: Generates beautiful visualizations of the brain's internal state.
+*   **`nanochat/neuroscore.py`** 🏆 **The Credit Score**: Tracks the "true utility" of experts (Loss Contribution, Resilience, Efficiency) to guide evolutionary decisions.
+*   **`scripts/tune_bio_params.py`** 🧬 **The Evolver**: CMA-ES optimizer that "breeds" better biological hyperparameters.
+*   **`scripts/enable_synapses.py`** 💉 **The Injector**: Utility to initialize or convert checkpoints to the synaptic architecture.
+*   **`prompts/`** 📜 **The DNA**: Contains the theoretical blueprints (`Neurological_transformer_model_GPT5_Pro.pdf`) that defined the system.
 
 ---
 
