@@ -15,8 +15,9 @@ import shutil
 import time
 import numpy as np
 
-from nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig
-from nanochat.synaptic import SynapticConfig
+from typing import cast
+from nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig, Block
+from nanochat.synaptic import SynapticConfig, SynapticMoE
 from nanochat.neuroviz import NeuroVizConfig, NeuroVizManager
 from nanochat.synaptic_splitmerge import SplitMergeConfig, SplitMergeController
 
@@ -50,7 +51,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[*] Device: {device}")
     
-    model = GPTSynaptic(model_cfg).to(device)
+    model = GPTSynaptic(model_cfg).to(device).to(torch.bfloat16)
     
     # 3. Setup NeuroViz & NeuroScore
     log_dir = "runs/verify_evo"
@@ -78,6 +79,8 @@ def main():
     
     # 5. Optimizer (include Xi)
     # We want to see if Xi moves, so we need it in the optimizer
+    # We can't pass Xi separately if we use model.setup_optimizers() because it returns a complex optimizer.
+    # So we manually build a simple AdamW here for the test.
     param_groups = [
         {'params': [p for n, p in model.named_parameters() if 'Xi' not in n], 'lr': 1e-3},
         {'params': [p for n, p in model.named_parameters() if 'Xi' in n], 'lr': 1e-2} # High LR for genes to see movement
@@ -88,9 +91,10 @@ def main():
     print("[*] Starting Evolution Loop (100 steps)...")
     
     # Snapshot initial genetics
-    moe_layer = model.transformer.h[0].mlp # First layer MoE
+    block0 = cast(Block, model.transformer.h[0])
+    moe_layer = cast(SynapticMoE, block0.mlp) # First layer MoE
     init_genes = moe_layer.Xi.detach().clone()
-    print(f"[*] Initial Genes (Layer 0, Expert 0): {init_genes[0].cpu().numpy()}")
+    print(f"[*] Initial Genes (Layer 0, Expert 0): {init_genes[0].float().cpu().numpy()}")
     
     model.train()
     
