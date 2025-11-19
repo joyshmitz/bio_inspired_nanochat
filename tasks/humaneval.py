@@ -6,7 +6,7 @@ It is a coding benchmark.
 
 import re
 from datasets import load_dataset
-from nanochat.execution import execute_code
+from bio_inspired_nanochat.execution import execute_code
 from tasks.common import Task
 
 def extract_imports(prompt):
