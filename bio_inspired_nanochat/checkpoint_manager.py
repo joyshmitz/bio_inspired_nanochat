@@ -8,14 +8,14 @@ import json
 import logging
 import torch
 
-from nanochat.common import get_base_dir
-from nanochat.gpt import GPT, GPTConfig
-from nanochat.tokenizer import get_tokenizer
-from nanochat.common import setup_default_logging
+from bio_inspired_nanochat.common import get_base_dir
+from bio_inspired_nanochat.gpt import GPT, GPTConfig
+from bio_inspired_nanochat.tokenizer import get_tokenizer
+from bio_inspired_nanochat.common import setup_default_logging
 
 # Try to import GPTSynaptic for synaptic model support
 try:
-    from nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig
+    from bio_inspired_nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig
 except Exception:
     GPTSynaptic = None
     GPTSynapticConfig = None
@@ -94,7 +94,7 @@ def build_model(checkpoint_dir, step, device, phase):
     # Check if this is a synaptic model
     if meta_data.get("synapses", False):
         assert GPTSynaptic is not None, "gpt_synaptic not found but synapses=True in metadata"
-        from nanochat.synaptic import SynapticConfig
+        from bio_inspired_nanochat.synaptic import SynapticConfig
         syn_cfg = SynapticConfig()  # Use defaults; could load from meta_data if saved
         model_config = GPTSynapticConfig(
             sequence_len=model_config_kwargs["sequence_len"],

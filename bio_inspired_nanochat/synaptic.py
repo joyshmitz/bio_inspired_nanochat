@@ -25,6 +25,16 @@ from typing import Optional, Tuple, List, Dict, cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from decouple import Config as DecoupleConfig, RepositoryEnv
+
+# Initialize decouple config
+# We assume .env exists as per project rules.
+try:
+    decouple_config = DecoupleConfig(RepositoryEnv(".env"))
+except Exception:
+    # Fallback if .env is missing (e.g. fresh checkout without setup)
+    from decouple import Config, AutoConfig
+    decouple_config = Config(RepositoryEnv(".env")) if False else AutoConfig()
 
 Tensor = torch.Tensor
 
@@ -110,6 +120,12 @@ class SynapticConfig:
     # general numerics
     epsilon: float = 1e-6
 
+    # Native (Rust) Kernel Toggles
+    native_presyn: bool = decouple_config("BIO_FUSED_PRESYN", default=False, cast=bool)
+    native_metrics: bool = decouple_config("BIO_FUSED_METRICS", default=False, cast=bool)
+    native_genetics: bool = decouple_config("BIO_FUSED_GENETICS", default=False, cast=bool)
+    native_plasticity: bool = decouple_config("BIO_FUSED_PLASTICITY", default=False, cast=bool)
+
 
 # -----------------------------------------------------------------------------
 # Presynaptic biophysics
@@ -165,6 +181,21 @@ class SynapticPresyn(nn.Module):
         )
 
         # Ca²⁺ drive from compatibilities; strictly causal and numerically safe
+        # If fused kernel is enabled and available, use it
+        if self.cfg.native_presyn and q.is_cuda:
+            try:
+                from bio_inspired_nanochat.kernels import presyn_step
+                syn_logit, state = presyn_step(q, k, logits, state, self.cfg)
+                return syn_logit, state
+            except ImportError:
+                pass  # Fallback to PyTorch
+            except Exception as e:
+                import traceback
+
+                print(f"Triton kernel failed, falling back to PyTorch: {e}")
+                traceback.print_exc()
+                pass
+
         drive = _softplus(logits.clamp(-20, 20)) * causal_mask.view(1, 1, T, T)
         counts = causal_mask.float().sum(dim=0, keepdim=True).clamp_min(1.0)  # (1,T)
         influx = drive.sum(dim=2) / counts.view(1, 1, T)  # (B,H,T)
@@ -374,7 +405,9 @@ class SynapticLinear(nn.Module):
     ):
         if self.input_ln is not None:
             x = self.input_ln(x)
-        W = self.w_fast + self.post.m_gate * self.w_slow + self.post.H_fast
+        m_gate = cast(Tensor, self.post.m_gate).detach().clone()
+        h_fast = cast(Tensor, self.post.H_fast).detach().clone()
+        W = self.w_fast + m_gate * self.w_slow + h_fast
         y = x @ W
         if self.bias is not None:
             y = y + self.bias
@@ -669,8 +702,10 @@ class SynapticMoE(nn.Module):
         router_unit = F.normalize(self.router_embeddings, dim=-1)
         align_bias = 0.02 * torch.einsum("btd,ed->bte", tok_unit, router_unit)
         bias = base_bias + gain_bias + align_bias
+        gene_bias = 0.05 * (alpha_energy - alpha_fatigue).view(1, 1, E)
         logits = (
             logits
+            + gene_bias
             + bias
             + 0.1 * energy_buf.view(1, 1, E)
             - 0.1 * fatigue_buf.view(1, 1, E)
@@ -682,8 +717,13 @@ class SynapticMoE(nn.Module):
         out = torch.zeros_like(x)
         flat_out = out.view(-1, C)
         flat_x = x.view(-1, C)
-        me = torch.zeros(E, device=device)
-        pe = torch.zeros(E, device=device)
+        use_fused_genetics = self.cfg.native_genetics and gates.is_cuda
+        if use_fused_genetics:
+            me = None
+            pe = None
+        else:
+            me = torch.zeros(E, device=device)
+            pe = torch.zeros(E, device=device)
         
         for e in range(E):
             mask = idx == e  # (B,T,k)
@@ -700,21 +740,26 @@ class SynapticMoE(nn.Module):
             y_e = self.experts[e](x_e, energy_override=energy_e, genes=gene_e)
             w = gates.masked_select(mask).unsqueeze(-1)
             flat_out.index_add_(0, flat_idx, w * y_e)
-            me[e] = sel.sum()
-            pe[e] = gates.masked_select(mask).sum()
+            if not use_fused_genetics:
+                me[e] = sel.sum()
+                pe[e] = gates.masked_select(mask).sum()
 
         with torch.no_grad():
-            util = me.clamp_min(1.0) / float(B * T)
-            # Metabolic Update using GENETICS
-            # fatigue += alpha_fatigue * util
-            # energy += alpha_energy * (1 - util)
-            # We need to handle the (0.99) decay logic as (1 - alpha).
-            
-            # Old: self.fatigue.mul_(0.99).add_(0.01 * util)
-            # New: self.fatigue = (1-alpha)*fatigue + alpha*util
-            
-            fatigue_buf.mul_(1.0 - alpha_fatigue).add_(alpha_fatigue * util)
-            energy_buf.mul_(1.0 - alpha_energy).add_(alpha_energy * (1.0 - util))
+            if use_fused_genetics:
+                from bio_inspired_nanochat.kernels import (
+                    accumulate_router_stats,
+                    update_metabolism_fused,
+                )
+
+                counts, gate_sums = accumulate_router_stats(idx.detach(), gates.detach(), E)
+                util = counts.clamp_min(1.0) / float(B * T)
+                update_metabolism_fused(fatigue_buf, energy_buf, alpha_fatigue, alpha_energy, util)
+                me = counts
+                pe = gate_sums
+            else:
+                util = me.clamp_min(1.0) / float(B * T)
+                fatigue_buf.mul_(1.0 - alpha_fatigue).add_(alpha_fatigue * util)
+                energy_buf.mul_(1.0 - alpha_energy).add_(alpha_energy * (1.0 - util))
 
             # Capture context for NeuroScore
             object.__setattr__(self, "last_ctx", {

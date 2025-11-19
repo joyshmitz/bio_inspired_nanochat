@@ -1,5 +1,5 @@
 """
-Common utilities for nanochat.
+Common utilities for bio_inspired_nanochat.
 """
 
 import os
@@ -54,7 +54,7 @@ def get_base_dir():
     else:
         home_dir = os.path.expanduser("~")
         cache_dir = os.path.join(home_dir, ".cache")
-        nanochat_dir = os.path.join(cache_dir, "nanochat")
+        nanochat_dir = os.path.join(cache_dir, 'bio_inspired_nanochat')
     os.makedirs(nanochat_dir, exist_ok=True)
     return nanochat_dir
 

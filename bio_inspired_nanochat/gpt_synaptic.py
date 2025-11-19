@@ -259,9 +259,9 @@ class GPTSynaptic(nn.Module):
             return [opt]  # Return as list for compatibility
         else:
             # GPT-style signature (for compatibility with existing training scripts)
-            from nanochat.common import get_dist_info
-            from nanochat.muon import Muon, DistMuon
-            from nanochat.adamw import DistAdamW
+            from bio_inspired_nanochat.common import get_dist_info
+            from bio_inspired_nanochat.muon import Muon, DistMuon
+            from bio_inspired_nanochat.adamw import DistAdamW
             from functools import partial
 
             model_dim = self.config.n_embd

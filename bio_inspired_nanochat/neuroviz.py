@@ -75,7 +75,9 @@ except Exception:
 
 
 def _to_np(x: torch.Tensor) -> np.ndarray:
-    return x.detach().cpu().numpy() if torch.is_tensor(x) else np.asarray(x)
+    if torch.is_tensor(x):
+        return x.detach().float().cpu().numpy()
+    return np.asarray(x)
 
 
 def _ensure_dir(path: str):
@@ -320,6 +322,8 @@ class NeuroVizManager:
             if isinstance(m, SynapticMoE):
                 name = f"moe_L{idx}"
                 self.layers.append((name, m))
+                if self.score is not None:
+                    self.score.register_layer(name, m.num_experts)
                 idx += 1
 
     def on_merge(

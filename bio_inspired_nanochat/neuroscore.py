@@ -11,6 +11,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Dict, Any
 from dataclasses import dataclass
 from .synaptic import SynapticMoE
@@ -63,12 +64,24 @@ class NeuroScore:
         # Contribution ~ RoutingWeight * ExpertEnergy (Heuristic: "Active & High Energy" ~ doing work)
         # A better "v2" would be RoutingWeight * |Grad_Expert_Output|
 
+        from decouple import Config as DecoupleConfig, RepositoryEnv, AutoConfig
+        try:
+            decouple_config = DecoupleConfig(RepositoryEnv(".env"))
+        except:
+            decouple_config = AutoConfig()
+            
+        fused_metrics = decouple_config("BIO_FUSED_METRICS", default=False, cast=bool)
+
         for name, module in model.named_modules():
             if isinstance(module, SynapticMoE):
                 if not hasattr(module, "last_ctx") or not module.last_ctx:
                     continue
 
                 layer_name = name
+                if self.neuroviz is not None:
+                    mapped = self.neuroviz._name_of(module)  # type: ignore[attr-defined]
+                    if mapped:
+                        layer_name = mapped
                 if layer_name not in self.stats:
                     self.register_layer(layer_name, module.num_experts)
 
@@ -77,6 +90,25 @@ class NeuroScore:
                 gates = ctx["gates"]  # (B,T,k)
                 indices = ctx["indices"]  # (B,T,k)
                 x_in = ctx["x"]  # (B,T,C)
+                energy = module.energy # (E,)
+
+                # Fused Kernel Path
+                if fused_metrics and gates.is_cuda:
+                    try:
+                        from bio_inspired_nanochat.kernels import update_metrics_fused
+
+                        if update_metrics_fused(indices, gates, energy, st, self.cfg):
+                            st["updates"] += 1
+
+                            if global_step % self.cfg.update_every == 0:
+                                self._update_specialization(st, x_in, indices, module.num_experts)
+                                if self.neuroviz:
+                                    self._log_metrics(layer_name, st, global_step)
+                            continue
+                    except ImportError:
+                        pass
+                    except Exception as e:
+                        print(f"Triton metrics kernel failed: {e}")
 
                 # 1. Specialization (Diversity of inputs)
                 # Calculate mean input vector per expert
@@ -99,7 +131,7 @@ class NeuroScore:
                 
                 # Scatter add
                 contrib_update = torch.zeros_like(st["loss_contrib"])
-                contrib_update.index_add_(0, indices_flat.cpu(), gates_flat.cpu())
+                contrib_update.index_add_(0, indices_flat.cpu(), gates_flat.float().cpu())
                 
                 # Normalize by batch size
                 batch_size = gates.shape[0] * gates.shape[1]
@@ -109,7 +141,7 @@ class NeuroScore:
                 st["loss_contrib"].mul_(self.cfg.decay).add_(contrib_update * (1 - self.cfg.decay))
 
                 # 3. Efficiency = Contribution / (Energy + epsilon)
-                energy_cpu = module.energy.detach().cpu()
+                energy_cpu = module.energy.detach().float().cpu()
                 st["efficiency"] = st["loss_contrib"] / (energy_cpu + 1e-6)
 
                 # 4. Resilience = 1 / (Variance of Contribution)
@@ -134,7 +166,7 @@ class NeuroScore:
         B, T, C = x.shape
         
         # Compute global mean of inputs
-        global_mean = x.mean(dim=(0, 1))  # (C,)
+        global_mean = x.mean(dim=(0, 1)).float()  # (C,)
         
         # We want mean input per expert.
         # Gather inputs for each expert? Too much memory.
@@ -142,14 +174,15 @@ class NeuroScore:
         # Just sample a subset for speed
         mask_prob = 0.1
         mask = torch.rand(B, T, device=x.device) < mask_prob
-        if not mask.any(): return
+        if not mask.any():
+            return
 
-        x_sub = x[mask] # (N, C)
+        x_sub = x[mask].float() # (N, C)
         ind_sub = indices[mask] # (N, k)
         
         # For each expert, compute centroid of assigned inputs
-        expert_sums = torch.zeros(num_experts, C, device=x.device)
-        expert_counts = torch.zeros(num_experts, device=x.device)
+        expert_sums = torch.zeros(num_experts, C, device=x.device, dtype=torch.float32)
+        expert_counts = torch.zeros(num_experts, device=x.device, dtype=torch.float32)
         
         # Naive loop is slow, but x_sub is small. 
         # Vectorized scatter_add is better.
@@ -161,7 +194,7 @@ class NeuroScore:
             # idx: (N,)
             idx = ind_sub[:, k_i]
             expert_sums.index_add_(0, idx, x_sub)
-            expert_counts.index_add_(0, idx, torch.ones_like(idx, float))
+            expert_counts.index_add_(0, idx, torch.ones_like(idx, dtype=torch.float32))
             
         expert_means = expert_sums / (expert_counts.unsqueeze(1) + 1e-6)
         
@@ -175,16 +208,18 @@ class NeuroScore:
 
     def _log_metrics(self, layer_name, st, step):
         # Push to TensorBoard via NeuroViz
-        if not self.neuroviz.tb: return
+        if not self.neuroviz or not getattr(self.neuroviz, "tb", None):
+            return
+        tb = self.neuroviz.tb
         
         # Scalars (Means)
-        self.neuroviz.tb.add_scalar(f"{layer_name}/score/mean_efficiency", st["efficiency"].mean(), step)
-        self.neuroviz.tb.add_scalar(f"{layer_name}/score/mean_specialization", st["specialization"].mean(), step)
-        self.neuroviz.tb.add_scalar(f"{layer_name}/score/mean_resilience", st["resilience"].mean(), step)
+        tb.add_scalar(f"{layer_name}/score/mean_efficiency", st["efficiency"].mean(), step)
+        tb.add_scalar(f"{layer_name}/score/mean_specialization", st["specialization"].mean(), step)
+        tb.add_scalar(f"{layer_name}/score/mean_resilience", st["resilience"].mean(), step)
         
         # Histograms
-        self.neuroviz.tb.add_histogram(f"{layer_name}/score/hist_efficiency", st["efficiency"], step)
-        self.neuroviz.tb.add_histogram(f"{layer_name}/score/hist_specialization", st["specialization"], step)
+        tb.add_histogram(f"{layer_name}/score/hist_efficiency", st["efficiency"], step)
+        tb.add_histogram(f"{layer_name}/score/hist_specialization", st["specialization"], step)
         
         # Leaderboard (Top 5 Experts by Efficiency)
         top_k = 5
@@ -196,6 +231,6 @@ class NeuroScore:
             i = idx.item()
             md += f"| {rank+1} | {i} | {val:.3f} | {st['specialization'][i]:.3f} | {st['loss_contrib'][i]:.3f} |\n"
             
-        self.neuroviz.tb.add_text(f"{layer_name}/leaderboard", md, step)
+        tb.add_text(f"{layer_name}/leaderboard", md, step)
 
 

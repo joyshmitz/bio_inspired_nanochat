@@ -10,8 +10,8 @@
 #     zeroes optimizer moments for changed parameters, and can broadcast in DDP.
 #
 # Works with:
-#   - SynapticMoE, SynapticExpert, SynapticLinear, PostsynapticHebb from nanochat/synaptic.py
-#   - GPTSynaptic from nanochat/gpt_synaptic.py
+#   - SynapticMoE, SynapticExpert, SynapticLinear, PostsynapticHebb from bio_inspired_nanochat/synaptic.py
+#   - GPTSynaptic from bio_inspired_nanochat/gpt_synaptic.py
 #
 # Usage:
 #   ctrl = SplitMergeController(model, SplitMergeConfig(...))
