@@ -504,10 +504,11 @@ class NeuroVizManager:
             emb2d[:, 0],
             emb2d[:, 1],
             c=cs,
-            s=30 + 200 * m["util"],
+            s=30 + 200 * m["utilization"],
             cmap="viridis",
             edgecolors="k",
             linewidths=0.3,
+            alpha=0.86,
         )
         plt.title(f"{name} — 2D map @ {step:,}")
         plt.axis("off")
