@@ -178,14 +178,37 @@ class SynapticPresyn(nn.Module):
         # Gather state for the selected keys
         # state tensors are (B, H, T_keys)
         # We gather along dim 2 (T_keys) using idx
-        c = state["c"].gather(2, idx)
+        # idx is (B, H, T, K)
+        # We need to expand state to (B, H, T_keys, 1) or similar?
+        # gather expects index to have same number of dimensions as input.
+        # state["c"] is (B, H, T_keys). idx is (B, H, T, K).
+        # We need to expand state to (B, H, T_keys, 1) and then gather?
+        # No, gather on dim 2 means we select from T_keys using indices in idx.
+        # But idx has 4 dims. state has 3.
+        # We need to view state as (B, H, T_keys, 1) and expand to (B, H, T_keys, K)? No.
+        # We want output (B, H, T, K).
+        # If we use gather on dim 2, input must have at least 3 dims.
+        # And index must have same number of dims.
+        # So we need to unsqueeze state to (B, H, T_keys, 1) and expand idx? No.
+        
+        # Correct way:
+        # We want to gather from T_keys dimension.
+        # Input: (B, H, T_keys)
+        # Index: (B, H, T, K)
+        # We can flatten T and K in index -> (B, H, T*K)
+        # Then gather -> (B, H, T*K)
+        # Then reshape -> (B, H, T, K)
+        
+        flat_idx = idx.view(B, H, -1)
+        
+        c = state["c"].gather(2, flat_idx).view(B, H, T, K)
         c = cfg.tau_c * c + cfg.alpha_c * F.softplus(drive)
         
-        sn = state["sn"].gather(2, idx)
-        clamp = state["cl"].gather(2, idx)
+        sn = state["sn"].gather(2, flat_idx).view(B, H, T, K)
+        clamp = state["cl"].gather(2, flat_idx).view(B, H, T, K)
         
         p = self._mix_prob(c, clamp, sn)
-        rrp = state["rrp"].gather(2, idx)
+        rrp = state["rrp"].gather(2, flat_idx).view(B, H, T, K)
 
         if train and cfg.stochastic_train_frac > 0:
             # Stochastic release on a fraction of edges
