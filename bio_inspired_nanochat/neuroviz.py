@@ -231,48 +231,65 @@ class LineageBook:
         evs = self.events.get(layer_name, [])
         if not evs:
             return
-        # very lightweight: just scatter the events along time with text labels
-        xs, ys, texts, colors = [], [], [], []
+            
+        fig = go.Figure()
         ymap = {}
-        ycur = 0
+        y_next = 0
+        
         for s, et, ids in evs:
             if et == "merge":
                 i, j, c = ids
                 for eid in (i, j, c):
                     if eid not in ymap:
-                        ymap[eid] = ycur
-                        ycur += 1
-                xs += [s, s, s]
-                ys += [ymap[i], ymap[j], ymap[c]]
-                texts += [f"merge parent {i}", f"merge parent {j}", f"child {c}"]
-                colors += ["purple", "purple", "purple"]
+                        ymap[eid] = y_next
+                        y_next += 1
+                
+                # Parent i -> Child c
+                fig.add_trace(go.Scatter(
+                    x=[s, s], y=[ymap[i], ymap[c]],
+                    mode="lines", line=dict(color="purple", width=1),
+                    hoverinfo="none"
+                ))
+                # Parent j -> Child c
+                fig.add_trace(go.Scatter(
+                    x=[s, s], y=[ymap[j], ymap[c]],
+                    mode="lines", line=dict(color="purple", width=1),
+                    hoverinfo="none"
+                ))
+                # Marker for child
+                fig.add_trace(go.Scatter(
+                    x=[s], y=[ymap[c]],
+                    mode="markers", marker=dict(color="purple", size=8, symbol="circle"),
+                    text=f"Merge {i}+{j}->{c}", hoverinfo="text"
+                ))
+                
             elif et == "split":
                 p, c = ids
                 for eid in (p, c):
                     if eid not in ymap:
-                        ymap[eid] = ycur
-                        ycur += 1
-                xs += [s, s]
-                ys += [ymap[p], ymap[c]]
-                texts += [f"split parent {p}", f"child {c}"]
-                colors += ["green", "green"]
-        fig = go.Figure(
-            data=[
-                go.Scatter(
-                    x=xs,
-                    y=ys,
-                    mode="markers+text",
-                    text=texts,
-                    marker=dict(color=colors, size=10),
-                )
-            ]
-        )
+                        ymap[eid] = y_next
+                        y_next += 1
+                
+                # Parent p -> Child c
+                fig.add_trace(go.Scatter(
+                    x=[s, s], y=[ymap[p], ymap[c]],
+                    mode="lines", line=dict(color="green", width=1),
+                    hoverinfo="none"
+                ))
+                # Marker for child
+                fig.add_trace(go.Scatter(
+                    x=[s], y=[ymap[c]],
+                    mode="markers", marker=dict(color="green", size=8, symbol="triangle-up"),
+                    text=f"Split {p}->{c}", hoverinfo="text"
+                ))
+
         fig.update_layout(
             title=f"Interactive Lineage — {layer_name} @ step {step:,}",
             xaxis_title="step",
             yaxis_title="expert track",
             template="plotly_dark",
-            height=500,
+            height=600,
+            showlegend=False
         )
         out = os.path.join(self.save_dir, f"{layer_name}_lineage_{step:09d}.html")
         fig.write_html(out, include_plotlyjs="cdn")
@@ -371,8 +388,15 @@ class NeuroVizManager:
         emb = _to_np(cast(torch.Tensor, moe.router_embeddings))  # (E, D)
         fatigue = _to_np(cast(torch.Tensor, moe.fatigue))  # (E,)
         energy = _to_np(cast(torch.Tensor, moe.energy))  # (E,)
-        util = 1.0 - np.clip(fatigue, 0.0, 1.0)  # util proxy
-        health = _weight_energy_util(energy, fatigue)
+        
+        # fatigue tracks EMA of usage. So it IS the utilization metric.
+        utilization = np.clip(fatigue, 0.0, 1.0)
+        
+        # availability is the inverse of fatigue
+        availability = 1.0 - utilization
+        
+        # health = energy * availability
+        health = energy * availability
 
         # expert-specific reductions
         mgate, camkii, elig = [], [], []
@@ -396,7 +420,8 @@ class NeuroVizManager:
 
         return dict(
             embedding=emb,
-            util=util,
+            utilization=utilization,
+            availability=availability,
             energy=energy,
             health=health,
             mgate=mgate_arr,
@@ -530,6 +555,54 @@ class NeuroVizManager:
         self._plot_presynaptic_dynamics(name, moe, step, outdir)
         self._plot_hebbian_memory(name, moe, step, outdir)
         self._plot_expert_raster(name, moe, step, outdir)
+        
+        # genetics and metabolism
+        self._plot_genetics(name, moe, step, outdir)
+        self._plot_metabolism(name, moe, step, outdir)
+        
+        # router decision breakdown
+        self._plot_router_decision(name, moe, step, outdir)
+
+    def _plot_router_decision(self, name: str, moe: SynapticMoE, step: int, outdir: str):
+        if not hasattr(moe, "last_ctx") or "decision_data" not in moe.last_ctx:
+            return
+            
+        d = moe.last_ctx["decision_data"]
+        # Convert to numpy
+        data = {k: _to_np(v) for k, v in d.items()}
+        
+        self._save_json(data, os.path.join(outdir, f"{name}_decision_{step:09d}.json"))
+
+    def _plot_genetics(self, name: str, moe: SynapticMoE, step: int, outdir: str):
+        if not hasattr(moe, "Xi") or not hasattr(moe, "_get_phenotype"):
+            return
+            
+        pheno = moe._get_phenotype(moe.Xi) # (E, 4)
+        pheno_np = _to_np(pheno)
+        
+        # [0] fatigue rate, [1] energy refill, [2] camkii, [3] pp1
+        data = {
+            "fatigue_rate": pheno_np[:, 0],
+            "energy_refill": pheno_np[:, 1],
+            "camkii_gain": pheno_np[:, 2],
+            "pp1_gain": pheno_np[:, 3],
+            "utilization": _to_np(cast(Tensor, moe.fatigue)) # Use fatigue as proxy for util history
+        }
+        self._save_json(data, os.path.join(outdir, f"{name}_genetics_{step:09d}.json"))
+
+    def _plot_metabolism(self, name: str, moe: SynapticMoE, step: int, outdir: str):
+        energy = _to_np(cast(Tensor, moe.energy))
+        fatigue = _to_np(cast(Tensor, moe.fatigue))
+        
+        # Sort by energy to show inequality
+        sorted_idx = np.argsort(energy)
+        
+        data = {
+            "energy": energy[sorted_idx],
+            "fatigue": fatigue[sorted_idx],
+            "ids": sorted_idx.tolist()
+        }
+        self._save_json(data, os.path.join(outdir, f"{name}_metabolism_{step:09d}.json"))
 
     def _save_json(self, data: Dict[str, Any], path: str):
         def default(obj):

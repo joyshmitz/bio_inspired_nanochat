@@ -4,6 +4,7 @@ import glob
 import time
 import json
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
@@ -152,11 +153,23 @@ with st.sidebar:
     page = st.radio("Go to", [
         "Overview", 
         "Synaptic Dynamics", 
+        "Anatomy of a Decision",
+        "Interactive Petri Dish",
+        "Interactive Hebbian Learning",
         "Structural Plasticity", 
-        "Population Stats"
+        "Population Stats",
+        "Genetics & Diversity",
+        "Metabolism Economy"
     ])
     
     st.markdown("---")
+    
+    # Live Mode Toggle
+    live_mode = st.toggle("Live Mode (Auto-Refresh)", value=False)
+    if live_mode:
+        time.sleep(2)
+        st.rerun()
+
     if st.button("Refresh Data", type="primary"):
         st.rerun()
         
@@ -312,6 +325,257 @@ elif page == "Synaptic Dynamics":
             st.warning("No raster data found yet.")
 
 # -----------------------------------------------------------------------------
+# Page: Anatomy of a Decision
+# -----------------------------------------------------------------------------
+
+elif page == "Anatomy of a Decision":
+    st.header(f"Anatomy of a Decision: {selected_layer}")
+    st.markdown("""
+    **Why did the Router choose Expert X?**
+    
+    We break down the routing logits into their biological components for a single token.
+    
+    *   **Content Match**: The standard dot-product similarity.
+    *   **Gene Bias**: Innate preference based on genetics.
+    *   **Energy Bias**: Boost for high-energy experts.
+    *   **Fatigue Penalty**: Penalty for tired experts.
+    """)
+    
+    files = get_files(f"images/{selected_layer}/{selected_layer}_decision_*.json")
+    if files:
+        idx = st.slider("History", 0, len(files)-1, 0, format="Step -%d", key="decision_slider")
+        data = load_json(files[idx])
+        
+        # Data is for all experts. We want to show the Top-K winners.
+        total_logits = np.array(data['total_logits'])
+        top_k_idx = np.argsort(total_logits)[-3:][::-1] # Top 3
+        
+        # Create columns for the top 3 experts
+        cols = st.columns(3)
+        
+        for i, expert_id in enumerate(top_k_idx):
+            with cols[i]:
+                st.subheader(f"Rank #{i+1}: Expert {expert_id}")
+                
+                # Extract components
+                components = {
+                    "Content": data['router_logits'][expert_id],
+                    "Genetics": data['gene_bias'][expert_id],
+                    "Alignment": data['align_bias'][expert_id],
+                    "Energy": data['energy_bias'][expert_id],
+                    "Fatigue": data['fatigue_bias'][expert_id]
+                }
+                
+                # Waterfall chart
+                fig = go.Figure(go.Waterfall(
+                    name = "20", orientation = "v",
+                    measure = ["relative"] * 5 + ["total"],
+                    x = list(components.keys()) + ["Total"],
+                    textposition = "outside",
+                    text = [f"{v:.2f}" for v in components.values()] + [f"{total_logits[expert_id]:.2f}"],
+                    y = list(components.values()) + [0], # 0 for total is placeholder, plotly calculates it? No, for total we need 0?
+                    # Actually for waterfall, y is the value.
+                    connector = {"line":{"color":"rgb(63, 63, 63)"}},
+                ))
+                
+                fig.update_layout(
+                    title = "Logit Composition",
+                    showlegend = False,
+                    template="plotly_dark",
+                    height=400,
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                
+    else:
+        st.warning("No decision data found yet.")
+
+# -----------------------------------------------------------------------------
+# Page: Interactive Petri Dish
+# -----------------------------------------------------------------------------
+
+elif page == "Interactive Petri Dish":
+    st.header("🧫 Interactive Petri Dish")
+    st.markdown("""
+    **Simulate Presynaptic Dynamics in Real-Time.**
+    
+    Adjust the biological parameters below to see how a synapse responds to "boredom" (repeated stimulation).
+    *   **Tau RRP**: How fast the vesicle pool refills.
+    *   **Alpha Ca**: How much calcium enters per spike.
+    *   **Tau Ca**: How fast calcium decays.
+    """)
+    
+    col1, col2 = st.columns([1, 3])
+    
+    with col1:
+        st.subheader("Bio-Parameters")
+        tau_rrp = st.slider("Tau RRP (Refill Time)", 1.0, 100.0, 40.0)
+        alpha_ca = st.slider("Alpha Ca (Influx)", 0.01, 1.0, 0.25)
+        tau_c = st.slider("Tau Ca (Decay)", 1.0, 20.0, 4.0)
+        complexin = st.slider("Complexin Bias (Clamp)", 0.0, 1.0, 0.5)
+        
+    with col2:
+        # Run simulation (Pure Python implementation of SynapticPresyn logic)
+        T = 100
+        # Stimulus: 50 steps ON, 50 steps OFF
+        stimulus = np.zeros(T)
+        stimulus[:50] = 20.0 # High logit
+        
+        # State
+        C = 0.0
+        RRP = 1.0
+        
+        # History
+        rrp_hist = []
+        c_hist = []
+        release_hist = []
+        
+        import math
+        
+        for t in range(T):
+            # 1. Calcium Influx
+            influx = np.log(1 + np.exp(stimulus[t])) # Softplus
+            rho_c = math.exp(-1.0 / tau_c)
+            C = rho_c * C + alpha_ca * influx
+            
+            # 2. Release Prob
+            # Simplified Syt model
+            syt = C / (C + 0.4)
+            p_release = 1.0 / (1.0 + np.exp(-(3.0 * syt - 2.0 * complexin))) # Sigmoid
+            
+            # 3. Release
+            release = p_release * RRP
+            
+            # 4. Refill
+            rho_r = math.exp(-1.0 / tau_rrp)
+            RRP = rho_r * RRP - release + 0.04 * (1.0 - RRP) # Simplified refill
+            
+            rrp_hist.append(RRP)
+            c_hist.append(C)
+            release_hist.append(release)
+            
+        # Plot
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.1)
+        fig.add_trace(go.Scatter(y=stimulus, name="Stimulus", fill='tozeroy'), row=1, col=1)
+        fig.add_trace(go.Scatter(y=c_hist, name="Calcium", line=dict(color="orange")), row=2, col=1)
+        fig.add_trace(go.Scatter(y=rrp_hist, name="RRP (Pool)", line=dict(color="green")), row=3, col=1)
+        
+        fig.update_layout(height=600, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig, use_container_width=True)
+
+# -----------------------------------------------------------------------------
+# Page: Interactive Hebbian Learning
+# -----------------------------------------------------------------------------
+
+elif page == "Interactive Hebbian Learning":
+    st.header("🧠 Interactive Hebbian Learning")
+    st.markdown("""
+    **Simulate Short-Term Memory (Fast Weights).**
+    
+    The model uses a "Fast Weight" matrix $H_{fast}$ to store associations from the recent context.
+    
+    *   **Rule**: $H_{fast} \leftarrow \\rho H_{fast} + \eta (U \cdot V^T)$
+    *   **Intuition**: "Neurons that fire together, wire together."
+    """)
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.subheader("Parameters")
+        eta = st.slider("Learning Rate (Eta)", 0.01, 0.5, 0.1)
+        rho = st.slider("Decay Rate (Rho)", 0.5, 1.0, 0.9)
+        steps = st.slider("Sequence Length", 5, 50, 20)
+        
+        st.subheader("Input Sequence")
+        pattern_type = st.radio("Pattern", ["Repeated (A A A...)", "Alternating (A B A B...)", "Random"])
+        
+    with col2:
+        # Simulation
+        dim = 10
+        # Define patterns
+        np.random.seed(42)
+        pat_A = np.random.randn(dim)
+        pat_A /= np.linalg.norm(pat_A)
+        pat_B = np.random.randn(dim)
+        pat_B /= np.linalg.norm(pat_B)
+        
+        # Generate sequence
+        seq = []
+        labels = []
+        for t in range(steps):
+            if pattern_type == "Repeated (A A A...)":
+                seq.append(pat_A)
+                labels.append("A")
+            elif pattern_type == "Alternating (A B A B...)":
+                if t % 2 == 0:
+                    seq.append(pat_A)
+                    labels.append("A")
+                else:
+                    seq.append(pat_B)
+                    labels.append("B")
+            else:
+                if np.random.rand() > 0.5:
+                    seq.append(pat_A)
+                    labels.append("A")
+                else:
+                    seq.append(pat_B)
+                    labels.append("B")
+                    
+        # Run Hebbian Dynamics
+        # Simplified: y = x (W + H). We assume W=Identity for clarity.
+        # H updates based on x * y^T (Oja-like or simple Hebb)
+        # In code: U update, V update, H update.
+        # Simplified for demo: H += eta * x * y^T
+        
+        H = np.zeros((dim, dim))
+        W = np.eye(dim)
+        
+        magnitudes = []
+        alignments_A = []
+        alignments_B = []
+        
+        for x in seq:
+            # Forward
+            y = x @ (W + H)
+            
+            # Measure
+            mag = np.linalg.norm(y)
+            magnitudes.append(mag)
+            
+            # Alignment with patterns (Recall)
+            align_A = np.dot(y / (mag + 1e-8), pat_A)
+            align_B = np.dot(y / (mag + 1e-8), pat_B)
+            alignments_A.append(align_A)
+            alignments_B.append(align_B)
+            
+            # Update
+            # Simple Hebb: dH = eta * outer(x, y)
+            # Decay
+            H = rho * H + eta * np.outer(x, y)
+            
+        # Plot
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
+                            subplot_titles=("Output Magnitude (Familiarity)", "Pattern Alignment (Recall)"))
+        
+        x_axis = list(range(steps))
+        
+        # Magnitude
+        fig.add_trace(go.Scatter(x=x_axis, y=magnitudes, name="Output Mag", line=dict(color="#F4D03F", width=3)), row=1, col=1)
+        
+        # Alignment
+        fig.add_trace(go.Scatter(x=x_axis, y=alignments_A, name="Match A", line=dict(color="#2ECC71", width=2)), row=2, col=1)
+        fig.add_trace(go.Scatter(x=x_axis, y=alignments_B, name="Match B", line=dict(color="#3498DB", width=2)), row=2, col=1)
+        
+        # Add labels to x-axis
+        fig.update_xaxes(ticktext=labels, tickvals=x_axis, row=2, col=1)
+        
+        fig.update_layout(height=500, template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig, use_container_width=True)
+        
+        st.caption(f"Final H Matrix Norm: {np.linalg.norm(H):.2f}")
+
+# -----------------------------------------------------------------------------
 # Page: Structural Plasticity
 # -----------------------------------------------------------------------------
 
@@ -371,3 +635,98 @@ elif page == "Population Stats":
             st.image(radar_files[idx], caption=os.path.basename(radar_files[idx]))
         else:
             st.info("No radar charts found yet.")
+
+# -----------------------------------------------------------------------------
+# Page: Genetics & Diversity
+# -----------------------------------------------------------------------------
+
+elif page == "Genetics & Diversity":
+    st.header(f"Genetics & Diversity: {selected_layer}")
+    st.markdown("""
+    **Evolutionary Drift**
+    
+    Each expert has a unique "genome" ($Xi$) that determines its biological properties.
+    We visualize how the population diversifies into different phenotypes.
+    
+    *   **X-axis**: Fatigue Rate (How fast they tire)
+    *   **Y-axis**: Energy Refill (How fast they recover)
+    *   **Color**: CaMKII Gain (Learning Rate)
+    *   **Size**: Utilization (Success)
+    """)
+    
+    files = get_files(f"images/{selected_layer}/{selected_layer}_genetics_*.json")
+    if files:
+        idx = st.slider("History", 0, len(files)-1, 0, format="Step -%d", key="gene_slider")
+        data = load_json(files[idx])
+        
+        df = pd.DataFrame({
+            "Fatigue Rate": data['fatigue_rate'],
+            "Energy Refill": data['energy_refill'],
+            "CaMKII Gain": data['camkii_gain'],
+            "Utilization": data['utilization']
+        })
+        
+        fig = px.scatter(
+            df, 
+            x="Fatigue Rate", 
+            y="Energy Refill", 
+            color="CaMKII Gain", 
+            size="Utilization",
+            hover_data=["CaMKII Gain"],
+            color_continuous_scale="Viridis",
+            template="plotly_dark"
+        )
+        fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("No genetics data found yet.")
+
+# -----------------------------------------------------------------------------
+# Page: Metabolism Economy
+# -----------------------------------------------------------------------------
+
+elif page == "Metabolism Economy":
+    st.header(f"Metabolism Economy: {selected_layer}")
+    st.markdown("""
+    **The Energy Market**
+    
+    Experts earn Energy (ATP) by being useful and spend it by firing.
+    This chart shows the distribution of wealth (Energy) across the population.
+    
+    *   **Inequality**: A steep curve means a few "rich" experts dominate.
+    *   **Poverty Line**: Experts near 0 energy are at risk of death (Merge).
+    """)
+    
+    files = get_files(f"images/{selected_layer}/{selected_layer}_metabolism_*.json")
+    if files:
+        idx = st.slider("History", 0, len(files)-1, 0, format="Step -%d", key="meta_slider")
+        data = load_json(files[idx])
+        
+        energy = np.array(data['energy'])
+        ids = np.array(data['ids'])
+        
+        # Create a bar chart sorted by energy
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=list(range(len(energy))),
+            y=energy,
+            marker=dict(color=energy, colorscale='Plasma'),
+            text=ids,
+            hovertemplate="Expert ID: %{text}<br>Energy: %{y:.2f}<extra></extra>"
+        ))
+        
+        fig.update_layout(
+            title="Wealth Distribution (Energy)",
+            xaxis_title="Experts (Sorted by Wealth)",
+            yaxis_title="Energy Level",
+            template="plotly_dark",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)'
+        )
+        
+        # Add poverty line
+        fig.add_hline(y=0.1, line_dash="dash", line_color="red", annotation_text="Starvation Risk")
+        
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("No metabolism data found yet.")
