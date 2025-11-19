@@ -10,3 +10,4 @@ target/*
 run_log*.txt
 .env
 .envrc
+wandb
