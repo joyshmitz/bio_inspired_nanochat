@@ -472,21 +472,21 @@ class NeuroVizManager:
         if self.tb is None:
             return
         self.tb.add_scalar(f"{name}/population", moe.num_experts, step)
-        self.tb.add_scalar(f"{name}/util_mean", float(np.mean(m["util"])), step)
+        self.tb.add_scalar(f"{name}/util_mean", float(np.mean(m["utilization"])), step)
         self.tb.add_scalar(f"{name}/energy_mean", float(np.mean(m["energy"])), step)
         self.tb.add_scalar(f"{name}/health_mean", float(np.mean(m["health"])), step)
         self.tb.add_scalar(f"{name}/mgate_mean", float(np.mean(m["mgate"])), step)
         self.tb.add_scalar(f"{name}/camkii_mean", float(np.mean(m["camkii"])), step)
 
         # histograms (downsample if huge)
-        for key in ("util", "energy", "health", "mgate", "camkii", "elig", "qprox"):
+        for key in ("utilization", "energy", "health", "mgate", "camkii", "elig", "qprox"):
             arr = m[key]
             self.tb.add_histogram(f"{name}/hist/{key}", arr, step)
 
         # embedding projector
         emb2d = _fit_2d(m["embedding"])
         meta = [
-            f"id:{i} util:{m['util'][i]:.3f} E:{m['energy'][i]:.2f}"
+            f"id:{i} util:{m['utilization'][i]:.3f} E:{m['energy'][i]:.2f}"
             for i in range(moe.num_experts)
         ]
         # add_embedding expects N x D; for 2D, it still works; for larger, projector clusters in higher-D
@@ -523,7 +523,7 @@ class NeuroVizManager:
         # map
         emb2d = _fit_2d(m["embedding"])
         fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-        size = 30 + 350 * m["util"] * m["health"]
+        size = 30 + 350 * m["utilization"] * m["health"]
         color = m["energy"] * m["camkii"] if np.max(m["camkii"]) > 0 else m["energy"]
         sc = ax.scatter(
             emb2d[:, 0],
@@ -842,9 +842,9 @@ class NeuroVizManager:
         outdir: str,
         top_n: int = 6,
     ):
-        N = min(top_n, len(m["util"]))
-        order = np.argsort(-m["util"])[:N]
-        labels = ["util", "energy", "camkii", "mgate", "elig", "qprox"]
+        N = min(top_n, len(m["utilization"]))
+        order = np.argsort(-m["utilization"])[:N]
+        labels = ["utilization", "energy", "camkii", "mgate", "elig", "qprox"]
         K = len(labels)
         th = np.linspace(0, 2 * np.pi, K, endpoint=False)
         
@@ -858,7 +858,7 @@ class NeuroVizManager:
         for idx in order:
             vals = np.array(
                 [
-                    m["util"][idx],
+                    m["utilization"][idx],
                     m["energy"][idx],
                     m["camkii"][idx],
                     m["mgate"][idx],
@@ -881,7 +881,7 @@ class NeuroVizManager:
 
     def _hists(self, name: str, m: Dict[str, np.ndarray], step: int, outdir: str):
         fig, axes = plt.subplots(2, 3, figsize=(12, 7))
-        keys = ["util", "energy", "health", "camkii", "mgate", "qprox"]
+        keys = ["utilization", "energy", "health", "camkii", "mgate", "qprox"]
         for ax, key in zip(axes.ravel(), keys):
             ax.hist(m[key], bins=20, color="#4472C4", alpha=0.85)
             ax.set_title(key)
