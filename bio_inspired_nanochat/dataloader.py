@@ -31,6 +31,8 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
         resume_rg_idx = resume_state_dict["rg_idx"] if resume_state_dict is not None else None
         pq_idx = resume_pq_idx # we kick off parquet files at the resume index (or by default just 0)
         while True: # iterate infinitely (multi-epoch)
+            if not parquet_paths:
+                raise RuntimeError("No parquet files found for split: " + split)
             while pq_idx < len(parquet_paths): # iterate over all parquet files
                 filepath = parquet_paths[pq_idx]
                 pf = pq.ParquetFile(filepath)
@@ -51,6 +53,9 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
                         yield batch[i:i+tokenizer_batch_size], (pq_idx, rg_idx)
                     rg_idx += ddp_world_size # advance to the next row group (in DDP)
                 pq_idx += 1 # advance to the next parquet file
+            # Reset for next epoch
+            pq_idx = 0
+            rg_idx = ddp_rank # Reset row group index for new epoch
     batches = document_batches()
 
     # Now emit batches of tokens.

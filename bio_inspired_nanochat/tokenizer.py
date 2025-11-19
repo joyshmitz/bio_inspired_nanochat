@@ -188,6 +188,15 @@ class RustBPETokenizer:
     @classmethod
     def from_directory(cls, tokenizer_dir):
         pickle_path = os.path.join(tokenizer_dir, "tokenizer.pkl")
+        if not os.path.exists(pickle_path):
+            # Fallback: if tokenizer.pkl doesn't exist, try to find it in the package data or regenerate it
+            # For now, let's just try to regenerate it if we are in the main process
+            print(f"Tokenizer not found at {pickle_path}, attempting to regenerate...")
+            # This is a bit hacky, but we need to ensure the tokenizer exists
+            # We can't easily regenerate it here without the training data.
+            # So we'll raise a more informative error.
+            raise FileNotFoundError(f"Tokenizer not found at {pickle_path}. Please run 'python -m bio_inspired_nanochat.tokenizer' to generate it.")
+            
         with open(pickle_path, "rb") as f:
             enc = pickle.load(f)
         return cls(enc, "<|bos|>")
