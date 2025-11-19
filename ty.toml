@@ -1,0 +1,14 @@
+[environment]
+python = "/data/projects/bio_inspired_nanochat/.venv/bin/python"
+
+[src]
+include = [
+    "bio_inspired_nanochat",
+    "scripts",
+    "tasks",
+    "tests",
+]
+exclude = [
+    "third_party/**",
+]
+

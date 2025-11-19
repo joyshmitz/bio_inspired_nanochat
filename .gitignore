@@ -5,4 +5,8 @@ rustbpe/target/
 dev-ignore/
 report.md
 eval_bundle/
-runs/verify_evo/
+runs/
+target/*
+run_log*.txt
+.env
+.envrc
