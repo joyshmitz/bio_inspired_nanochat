@@ -3,9 +3,9 @@
 
 import argparse
 import torch
-from nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig
-from nanochat.synaptic import SynapticConfig
-from nanochat.checkpoint_manager import save_checkpoint
+from bio_inspired_nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig
+from bio_inspired_nanochat.synaptic import SynapticConfig
+from bio_inspired_nanochat.checkpoint_manager import save_checkpoint
 
 
 def build_synaptic(

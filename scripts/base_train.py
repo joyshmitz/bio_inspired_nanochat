@@ -20,23 +20,23 @@ import wandb
 import torch
 import torch.nn.functional as F
 
-from nanochat.gpt import GPT, GPTConfig
+from bio_inspired_nanochat.gpt import GPT, GPTConfig
 try:
-    from nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig
-    from nanochat.synaptic import SynapticConfig
-    from nanochat.synaptic_splitmerge import SplitMergeController, SplitMergeConfig
+    from bio_inspired_nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig
+    from bio_inspired_nanochat.synaptic import SynapticConfig
+    from bio_inspired_nanochat.synaptic_splitmerge import SplitMergeController, SplitMergeConfig
 except Exception:
     GPTSynaptic = None
     GPTSynapticConfig = None
     SynapticConfig = None
     SplitMergeController = None
     SplitMergeConfig = None
-from nanochat.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
-from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
-from nanochat.tokenizer import get_tokenizer, get_token_bytes
-from nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
-from nanochat.loss_eval import evaluate_bpb
-from nanochat.engine import Engine
+from bio_inspired_nanochat.dataloader import tokenizing_distributed_data_loader, tokenizing_distributed_data_loader_with_state
+from bio_inspired_nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type
+from bio_inspired_nanochat.tokenizer import get_tokenizer, get_token_bytes
+from bio_inspired_nanochat.checkpoint_manager import save_checkpoint, load_checkpoint
+from bio_inspired_nanochat.loss_eval import evaluate_bpb
+from bio_inspired_nanochat.engine import Engine
 from scripts.base_eval import evaluate_model
 print_banner()
 
@@ -84,7 +84,7 @@ save_every = -1 # every how many steps to save model checkpoints (-1 = disable, 
 model_tag = "" # optionally override the model tag for the output checkpoint directory name
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
+exec(open(os.path.join('bio_inspired_nanochat', 'configurator.py')).read()) # overrides from command line or config file
 user_config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 
@@ -98,7 +98,7 @@ get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else l
 
 # wandb logging init
 use_dummy_wandb = run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", name=run, config=user_config)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project='bio_inspired_nanochat', name=run, config=user_config)
 
 # Tokenizer will be useful for evaluation, also we need the vocab size
 tokenizer = get_tokenizer()
@@ -457,7 +457,7 @@ print0(f"Total training time: {total_training_time/60:.2f}m")
 print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 
 # Log to report
-from nanochat.report import get_report
+from bio_inspired_nanochat.report import get_report
 get_report().log(section="Base model training", data=[
     user_config, # CLI args
     { # stats about the training setup

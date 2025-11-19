@@ -6,10 +6,10 @@ python -m scripts.chat_cli -i mid
 """
 import argparse
 import torch
-from nanochat.common import compute_init, autodetect_device_type
+from bio_inspired_nanochat.common import compute_init, autodetect_device_type
 from contextlib import nullcontext
-from nanochat.engine import Engine
-from nanochat.checkpoint_manager import load_model
+from bio_inspired_nanochat.engine import Engine
+from bio_inspired_nanochat.checkpoint_manager import load_model
 
 parser = argparse.ArgumentParser(description='Chat with the model')
 parser.add_argument('-i', '--source', type=str, default="sft", help="Source of the model: sft|mid|rl")

@@ -10,22 +10,47 @@
 import torch
 import os
 import shutil
+import argparse
 
 from typing import cast
-from nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig, Block
-from nanochat.synaptic import SynapticConfig, SynapticMoE
-from nanochat.neuroviz import NeuroVizConfig, NeuroVizManager
-from nanochat.synaptic_splitmerge import SplitMergeConfig, SplitMergeController
+from bio_inspired_nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig, Block
+from bio_inspired_nanochat.synaptic import SynapticConfig, SynapticMoE
+from bio_inspired_nanochat.neuroviz import NeuroVizConfig, NeuroVizManager
+from bio_inspired_nanochat.synaptic_splitmerge import SplitMergeConfig, SplitMergeController
 
 def main():
+    parser = argparse.ArgumentParser(description="Verify Bio-Inspired Nanochat Evolution")
+    parser.add_argument("--fused-presyn", action="store_true", default=None, help="Enable fused (Triton) presyn kernel")
+    parser.add_argument("--no-fused-presyn", action="store_false", dest="fused_presyn", help="Disable fused presyn kernel")
+    parser.add_argument("--fused-metrics", action="store_true", default=None, help="Enable fused metrics")
+    parser.add_argument("--no-fused-metrics", action="store_false", dest="fused_metrics", help="Disable fused metrics")
+    parser.add_argument("--fused-genetics", action="store_true", default=None, help="Enable fused genetics")
+    parser.add_argument("--no-fused-genetics", action="store_false", dest="fused_genetics", help="Disable fused genetics")
+    
+    args = parser.parse_args()
+
     # 1. Setup Config
     print("[*] Setting up Bio-Synaptic Model...")
     
-    syn_cfg = SynapticConfig(
-        enabled=True,
-        tau_rrp=20.0,  # Fast dynamics for quick test
-        xi_dim=4,      # Genetic vector size
-    )
+    torch.autograd.set_detect_anomaly(True)
+
+    syn_kwargs = {
+        "enabled": True,
+        "tau_rrp": 20.0,
+        "xi_dim": 4,
+    }
+    
+    # Override defaults if flags are provided
+    if args.fused_presyn is not None:
+        syn_kwargs["native_presyn"] = args.fused_presyn
+    if args.fused_metrics is not None:
+        syn_kwargs["native_metrics"] = args.fused_metrics
+    if args.fused_genetics is not None:
+        syn_kwargs["native_genetics"] = args.fused_genetics
+
+    syn_cfg = SynapticConfig(**syn_kwargs)
+    
+    print(f"[*] Synaptic Config: native_presyn={syn_cfg.native_presyn}, native_metrics={syn_cfg.native_metrics}")
     
     # Tiny model for speed
     model_cfg = GPTSynapticConfig(

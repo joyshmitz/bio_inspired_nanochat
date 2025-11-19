@@ -23,9 +23,9 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, DummyWandb
-from nanochat.checkpoint_manager import save_checkpoint, load_model
-from nanochat.engine import Engine
+from bio_inspired_nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, DummyWandb
+from bio_inspired_nanochat.checkpoint_manager import save_checkpoint, load_model
+from bio_inspired_nanochat.engine import Engine
 from tasks.gsm8k import GSM8K
 
 # RL hyperparameters
@@ -49,7 +49,7 @@ eval_every = 60 # every how many steps to evaluate the model for val pass@k
 eval_examples = 400 # number of examples used for evaluating pass@k
 # now allow CLI to override the settings via the configurator lol
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
+exec(open(os.path.join('bio_inspired_nanochat', 'configurator.py')).read()) # overrides from command line or config file
 user_config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 
@@ -332,7 +332,7 @@ for step in range(num_steps):
         print(f"✅ Saved model checkpoint to {checkpoint_dir}")
 
 # Log to report
-from nanochat.report import get_report
+from bio_inspired_nanochat.report import get_report
 get_report().log(section="Chat RL", data=[
     user_config, # CLI args
 ])

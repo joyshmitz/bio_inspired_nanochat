@@ -17,11 +17,11 @@ import wandb
 import torch
 import torch.nn.functional as F
 from contextlib import nullcontext
-from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type
-from nanochat.tokenizer import get_token_bytes
-from nanochat.checkpoint_manager import save_checkpoint
-from nanochat.loss_eval import evaluate_bpb
-from nanochat.checkpoint_manager import load_model
+from bio_inspired_nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type
+from bio_inspired_nanochat.tokenizer import get_token_bytes
+from bio_inspired_nanochat.checkpoint_manager import save_checkpoint
+from bio_inspired_nanochat.loss_eval import evaluate_bpb
+from bio_inspired_nanochat.checkpoint_manager import load_model
 import torch.distributed as dist
 
 from tasks.common import TaskMixture
@@ -51,7 +51,7 @@ eval_tokens = 20*524288
 total_batch_size = 524288
 dry_run = 0 # dry_run=1 is for experiments: we will log to wandb but we won't write checkpoints or report
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
+exec(open(os.path.join('bio_inspired_nanochat', 'configurator.py')).read()) # overrides from command line or config file
 user_config = {k: globals()[k] for k in config_keys} # possibly useful for logging
 # -----------------------------------------------------------------------------
 
@@ -325,7 +325,7 @@ print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
 
 # Log to report
 if not dry_run:
-    from nanochat.report import get_report
+    from bio_inspired_nanochat.report import get_report
     get_report().log(section="Midtraining", data=[
         user_config, # CLI args
         { # stats about the training setup
