@@ -34,12 +34,15 @@ try:
         SplitMergeController,
         SplitMergeConfig,
     )
+    from bio_inspired_nanochat.neuroviz import NeuroVizManager, NeuroVizConfig
 except Exception:
     GPTSynaptic = None
     GPTSynapticConfig = None
     SynapticConfig = None
     SplitMergeController = None
     SplitMergeConfig = None
+    NeuroVizManager = None
+    NeuroVizConfig = None
 from bio_inspired_nanochat.dataloader import (
     tokenizing_distributed_data_loader,
     tokenizing_distributed_data_loader_with_state,
@@ -112,6 +115,12 @@ save_every = -1  # every how many steps to save model checkpoints (-1 = disable,
 model_tag = (
     ""  # optionally override the model tag for the output checkpoint directory name
 )
+# NeuroViz settings
+neuroviz_dir = "runs/neuroviz"
+neuroviz_image_every = 10000
+neuroviz_tb_every = 1000
+neuroviz_interactive_every = 25000
+
 # now allow CLI to override the settings via the configurator lol
 config_keys = [
     k
@@ -279,6 +288,24 @@ else:
     adamw_optimizer = optimizers[0]
     muon_optimizer = None
 
+# Initialize NeuroVizManager
+viz = None
+if use_syn and master_process and NeuroVizManager is not None:
+    viz_cfg = NeuroVizConfig(
+        log_dir=neuroviz_dir,
+        image_every=neuroviz_image_every,
+        tb_every=neuroviz_tb_every,
+        interactive_every=neuroviz_interactive_every,
+    )
+    viz = NeuroVizManager(viz_cfg)
+    # We need to register the original model (before compile) or compiled?
+    # NeuroViz iterates modules looking for SynapticMoE.
+    # torch.compile wraps the model.
+    # Let's try registering the compiled model, if it fails we might need orig_model.
+    # But SynapticMoE modules should still be accessible.
+    # Actually, let's use orig_model to be safe as it's definitely a nn.Module structure we know.
+    viz.register_model(orig_model)
+
 # Initialize split/merge controller if enabled
 sm_ctrl = None
 if splitmerge_every > 0 and SplitMergeController is not None:
@@ -293,7 +320,7 @@ if splitmerge_every > 0 and SplitMergeController is not None:
         verbose=bool(sm_verbose),
         ddp_broadcast=True,
     )
-    sm_ctrl = SplitMergeController(model, sm_cfg)
+    sm_ctrl = SplitMergeController(model, sm_cfg, logger=viz)
 
 if resuming:
     for opt, dat in zip(optimizers, optimizer_data):
@@ -377,6 +404,8 @@ while True:
         model.eval()
         val_loader = build_val_loader()
         eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
+        # Ensure eval_steps is at least 1
+        eval_steps = max(1, eval_steps)
         with autocast_ctx:
             # evaluate_bpb expects model(x, y, loss_reduction='none') which works for GPT
             # For GPTSynaptic, we need to wrap it
@@ -590,6 +619,10 @@ while True:
             log_data["train/grad_norm"] = grad_norm
         wandb_run.log(log_data)
 
+    if viz is not None:
+        # Use orig_model for visualization to avoid compilation artifacts if any
+        viz.step(orig_model, step, loss=train_loss)
+
     # state update
     step += 1
 
@@ -627,5 +660,7 @@ get_report().log(
 )
 
 # cleanup
+if viz is not None:
+    viz.close()
 wandb_run.finish()  # wandb run finish
 compute_cleanup()
