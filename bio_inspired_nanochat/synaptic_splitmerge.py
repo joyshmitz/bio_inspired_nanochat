@@ -153,8 +153,56 @@ def _copy_synaptic_linear_(dst: SynapticLinear, src: SynapticLinear):
 
 
 @torch.no_grad()
-def _merge_linear_into_(winner: SynapticLinear, loser: SynapticLinear, alpha: float):
-    """winner = alpha * winner + (1-alpha) * loser"""
+def _merge_linear_into_(winner: SynapticLinear, loser: SynapticLinear, alpha: float, cfg: SplitMergeConfig):
+    """winner = alpha * winner + (1-alpha) * loser; loser = winner + noise"""
+    if cfg.enabled and winner.w_slow.is_cuda: # Check if we can use fused kernel
+        try:
+            from bio_inspired_nanochat.kernels import mix_and_shift_tensors
+            # Weights
+            mix_and_shift_tensors(winner.w_slow, loser.w_slow, alpha, cfg.clone_noise_linear)
+            mix_and_shift_tensors(winner.w_fast, loser.w_fast, alpha, cfg.clone_noise_linear)
+            if (winner.bias is not None) and (loser.bias is not None):
+                mix_and_shift_tensors(cast(Tensor, winner.bias), cast(Tensor, loser.bias), alpha, cfg.clone_noise_linear)
+            
+            # Postsynaptic state
+            # For state, we might want less noise or different logic?
+            # Original logic:
+            # winner = alpha*winner + (1-alpha)*loser
+            # loser = winner + noise (clone)
+            # BUT original _clone_linear_from_ did:
+            # dst.post.H_fast.zero_()
+            # dst.post.U.mul_(0.5)
+            # So simple mix_and_shift is NOT correct for state if we want to reset/dampen loser.
+            
+            # Let's stick to manual for state to preserve logic, or adapt kernel.
+            # The kernel does: t2 = t1 + noise.
+            # We want t2 = 0 or t2 = t1 * 0.5.
+            
+            # So we only use fused kernel for weights/biases which are the big tensors.
+            # State tensors are small (rank R).
+            
+            # Manual state update (same as before)
+            cast(Tensor, winner.post.U).mul_(alpha).add_((1.0 - alpha) * cast(Tensor, loser.post.U))
+            cast(Tensor, winner.post.V).mul_(alpha).add_((1.0 - alpha) * cast(Tensor, loser.post.V))
+            cast(Tensor, winner.post.H_fast).mul_(alpha).add_((1.0 - alpha) * cast(Tensor, loser.post.H_fast))
+            cast(Tensor, winner.post.m_gate).mul_(0.9).add_(0.1 * cast(Tensor, loser.post.m_gate))
+            cast(Tensor, winner.post.camkii).mul_(0.9).add_(0.1 * cast(Tensor, loser.post.camkii))
+            cast(Tensor, winner.post.pp1).mul_(0.9).add_(0.1 * cast(Tensor, loser.post.pp1))
+            
+            # Clone state to loser (with reset logic)
+            cast(Tensor, loser.post.U).copy_(cast(Tensor, winner.post.U)).mul_(0.5)
+            cast(Tensor, loser.post.V).copy_(cast(Tensor, winner.post.V)).mul_(0.5)
+            cast(Tensor, loser.post.H_fast).zero_()
+            cast(Tensor, loser.post.m_gate).copy_(cast(Tensor, winner.post.m_gate))
+            cast(Tensor, loser.post.camkii).copy_(cast(Tensor, winner.post.camkii))
+            cast(Tensor, loser.post.pp1).copy_(cast(Tensor, winner.post.pp1))
+            
+            return
+        except ImportError:
+            pass
+
+    # Fallback / CPU logic
+    # winner = alpha * winner + (1-alpha) * loser
     winner.w_slow.mul_(alpha).add_((1.0 - alpha) * loser.w_slow)
     winner.w_fast.mul_(alpha).add_((1.0 - alpha) * loser.w_fast)
     if (winner.bias is not None) and (loser.bias is not None):
@@ -166,6 +214,9 @@ def _merge_linear_into_(winner: SynapticLinear, loser: SynapticLinear, alpha: fl
     cast(Tensor, winner.post.m_gate).mul_(0.9).add_(0.1 * cast(Tensor, loser.post.m_gate))
     cast(Tensor, winner.post.camkii).mul_(0.9).add_(0.1 * cast(Tensor, loser.post.camkii))
     cast(Tensor, winner.post.pp1).mul_(0.9).add_(0.1 * cast(Tensor, loser.post.pp1))
+    
+    # Clone back into loser (to keep count constant)
+    _clone_linear_from_(loser, winner, cfg.clone_noise_linear)
 
 
 @torch.no_grad()
@@ -193,25 +244,35 @@ def _merge_expert_into_and_clone_(
     winner: SynapticExpert = layer.experts[winner_idx]
     loser: SynapticExpert = layer.experts[loser_idx]
 
-    # 1) Merge parameters into winner
-    _merge_linear_into_(winner.fc1, loser.fc1, alpha)
-    _merge_linear_into_(winner.fc2, loser.fc2, alpha)
-
-    # 2) Clone back into loser (to keep count constant)
-    _clone_linear_from_(loser.fc1, winner.fc1, cfg.clone_noise_linear)
-    _clone_linear_from_(loser.fc2, winner.fc2, cfg.clone_noise_linear)
+    # 1) Merge parameters into winner AND clone to loser
+    # We combined these steps in _merge_linear_into_ if fused
+    _merge_linear_into_(winner.fc1, loser.fc1, alpha, cfg)
+    _merge_linear_into_(winner.fc2, loser.fc2, alpha, cfg)
 
     # 3) Router columns: average into winner, clone into loser (with noise)
-    W = layer.router.weight  # shape: (n_embd, E) in PyTorch's (out_features, in_features) conv; here we defined Linear(n_embd->E): weight is (E, n_embd) if bias=False? Actually torch.nn.Linear(out,in) has weight (out,in)
-    # In synaptic.py, router = nn.Linear(n_embd, num_experts, bias=False); so weight shape is (E, n_embd)
-    # We'll operate on row vectors (expert rows):
-    W_w = W[winner_idx]  # (n_embd,)
-    W_l = W[loser_idx]
-    W_w.mul_(alpha).add_((1.0 - alpha) * W_l)
-    W_l.copy_(W_w)
-    _add_noise_(W_l, cfg.clone_noise_router)
+    W = layer.router.weight
+    if W.is_cuda:
+        try:
+            from bio_inspired_nanochat.kernels import mix_and_shift_rows
+            # W is (E, n_embd). We want to mix row[winner] and row[loser].
+            mix_and_shift_rows(W, winner_idx, loser_idx, alpha, cfg.clone_noise_router)
+        except ImportError:
+             # Fallback
+            W_w = W[winner_idx]
+            W_l = W[loser_idx]
+            W_w.mul_(alpha).add_((1.0 - alpha) * W_l)
+            W_l.copy_(W_w)
+            _add_noise_(W_l, cfg.clone_noise_router)
+    else:
+        W_w = W[winner_idx]
+        W_l = W[loser_idx]
+        W_w.mul_(alpha).add_((1.0 - alpha) * W_l)
+        W_l.copy_(W_w)
+        _add_noise_(W_l, cfg.clone_noise_router)
 
     # 4) Router embeddings: keep winner embedding; clone loser as orthogonalized perturbed winner
+    # This logic is specific (orthogonal perturb), so we keep it manual for now or write another kernel.
+    # Since it's just 1 vector per expert, manual is fine.
     emb = layer.router_embeddings  # (E, D)
     e_w = emb[winner_idx : winner_idx + 1]  # (1,D)
     e_l = _orthogonal_perturb_like(e_w.clone(), cfg.clone_noise_embed)

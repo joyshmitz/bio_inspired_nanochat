@@ -334,7 +334,7 @@ def presyn_step(q, k, logits, state, cfg):
         state_tensors["C"], state_tensors["BUF"], state_tensors["RRP"],
         state_tensors["RES"], state_tensors["PR"], state_tensors["CL"], state_tensors["E"],
         # Strides (for flat inputs, stride_b is stride_seq)
-        logits_flat.stride(0), logits_flat.stride(1), 0, logits_flat.stride(2), # stride_b, h(unused), t, k
+        logits_flat.stride(0), 0, logits_flat.stride(1), logits_flat.stride(2), # stride_b, h(unused), t, k
         q_flat.stride(0), 0, q_flat.stride(1), q_flat.stride(2),
         k_flat.stride(0), 0, k_flat.stride(1), k_flat.stride(2),
         state_tensors["C"].stride(0), 0, state_tensors["C"].stride(1),
