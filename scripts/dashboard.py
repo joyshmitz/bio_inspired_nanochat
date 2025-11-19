@@ -154,6 +154,7 @@ with st.sidebar:
         "Overview", 
         "Synaptic Dynamics", 
         "Anatomy of a Decision",
+        "Semantic Space",
         "Interactive Petri Dish",
         "Interactive Hebbian Learning",
         "Structural Plasticity", 
@@ -226,28 +227,37 @@ elif page == "Synaptic Dynamics":
         files = get_files(f"images/{selected_layer}/{selected_layer}_contrib_*.json")
         if files:
             idx = st.slider("History (Contrib)", 0, len(files)-1, 0, format="Step -%d", key="contrib_slider")
-            data = load_json(files[idx])
-            
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=data['ids'], y=data['slow_norms'], name='Slow (Static)',
-                marker_color='#4472C4'
-            ))
-            fig.add_trace(go.Bar(
-                x=data['ids'], y=data['fast_norms'], name='Fast (Bio)',
-                marker_color='#ED7D31'
-            ))
-            fig.update_layout(
-                barmode='group', 
-                template="plotly_dark",
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                yaxis_title="Weight Norm (L2)",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                data = load_json(files[idx])
+                
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=data['ids'], y=data['slow_norms'], name='Slow (Static)',
+                    marker_color='#4472C4'
+                ))
+                fig.add_trace(go.Bar(
+                    x=data['ids'], y=data['fast_norms'], name='Fast (Bio)',
+                    marker_color='#ED7D31'
+                ))
+                fig.update_layout(
+                    barmode='group', 
+                    template="plotly_dark",
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    yaxis_title="Weight Norm (L2)",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error loading contribution data: {e}")
         else:
-            st.warning("No contribution data found yet.")
+            # Fallback to PNG if JSON not found
+            png_files = get_files(f"images/{selected_layer}/{selected_layer}_contrib_*.png")
+            if png_files:
+                idx = st.slider("History (Contrib PNG)", 0, len(png_files)-1, 0, format="Step -%d", key="contrib_png_slider")
+                st.image(png_files[idx], caption=os.path.basename(png_files[idx]))
+            else:
+                st.warning("No contribution data found yet.")
 
     # --- Tab 2: Presynaptic ---
     with tab2:
@@ -390,6 +400,90 @@ elif page == "Anatomy of a Decision":
                 
     else:
         st.warning("No decision data found yet.")
+
+# -----------------------------------------------------------------------------
+# Page: Semantic Space
+# -----------------------------------------------------------------------------
+
+elif page == "Semantic Space":
+    st.header(f"Semantic Space: {selected_layer}")
+    st.markdown("""
+    **Where does the Token live?**
+    
+    We project the **Token's Router Probe** and all **Expert Embeddings** into 2D space.
+    
+    *   **🔴 Red Star**: The current Token.
+    *   **⚪ Grey Dots**: The Experts.
+    *   **🔵 Blue Halo**: The Experts that were actually chosen (Gated).
+    
+    This shows if the router is picking experts that are *semantically close* to the token (good alignment) or if other biases (Fatigue/Energy) are forcing it to pick distant experts.
+    """)
+    
+    files = get_files(f"images/{selected_layer}/{selected_layer}_semantic_*.json")
+    if files:
+        idx = st.slider("History", 0, len(files)-1, 0, format="Step -%d", key="semantic_slider")
+        data = load_json(files[idx])
+        
+        token_x = data['token_x']
+        token_y = data['token_y']
+        exp_x = data['experts_x']
+        exp_y = data['experts_y']
+        gates = np.array(data['gates'])
+        
+        fig = go.Figure()
+        
+        # All experts
+        fig.add_trace(go.Scatter(
+            x=exp_x, y=exp_y,
+            mode='markers',
+            marker=dict(
+                size=8,
+                color=gates,
+                colorscale=[[0, 'grey'], [0.01, 'grey'], [0.01, '#2196F3'], [1, '#2196F3']],
+                showscale=False,
+                opacity=0.6
+            ),
+            text=[f"Expert {i}<br>Gate: {g:.2f}" for i, g in enumerate(gates)],
+            hoverinfo='text',
+            name='Experts'
+        ))
+        
+        # Selected experts (Halo)
+        selected_mask = gates > 0
+        if np.any(selected_mask):
+            fig.add_trace(go.Scatter(
+                x=np.array(exp_x)[selected_mask],
+                y=np.array(exp_y)[selected_mask],
+                mode='markers',
+                marker=dict(
+                    size=15,
+                    color='rgba(0,0,0,0)',
+                    line=dict(color='#2196F3', width=2)
+                ),
+                hoverinfo='skip',
+                name='Selected'
+            ))
+        
+        # Token
+        fig.add_trace(go.Scatter(
+            x=[token_x], y=[token_y],
+            mode='markers',
+            marker=dict(size=18, symbol='star', color='#FF5252'),
+            name='Current Token'
+        ))
+        
+        fig.update_layout(
+            template="plotly_dark",
+            height=600,
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            showlegend=True
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("No semantic space data found yet.")
 
 # -----------------------------------------------------------------------------
 # Page: Interactive Petri Dish
