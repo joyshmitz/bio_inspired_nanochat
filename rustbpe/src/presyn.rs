@@ -122,19 +122,11 @@ pub fn presyn_step_cpu<'py>(
     let rho_e = (-1.0 / c.tau_energy).exp();
     let sqrt_d = (d_dim as f32).sqrt();
 
-    // Parallel iteration over B, H
-    // We use unsafe pointers to write to the output arrays in parallel
-    // This is safe because each thread writes to a disjoint slice (b, h)
-    
-    // Get raw pointers to the data
-    // Note: ArrayD might not be contiguous, but if created with zeros() it usually is.
-    // However, slicing it mutably in parallel is tricky with ndarray.
-    // We'll use `Zip` or just `par_iter` over indices and `unsafe` access.
-    
-    // To make it safe(r), we can wrap the mutable arrays in a struct that implements Sync
-    // and use unsafe `uget_mut` inside.
+    // Wrapper for raw pointers to allow passing to rayon threads
+    #[derive(Clone, Copy)]
     struct UnsafeArray<T>(*mut ArrayD<T>);
     unsafe impl<T> Sync for UnsafeArray<T> {}
+    unsafe impl<T> Send for UnsafeArray<T> {}
     
     let syn_logit_ptr = UnsafeArray(&mut syn_logit as *mut _);
     let c_new_ptr = UnsafeArray(&mut c_new as *mut _);
@@ -144,8 +136,17 @@ pub fn presyn_step_cpu<'py>(
     let pr_new_ptr = UnsafeArray(&mut pr_new as *mut _);
     let e_new_ptr = UnsafeArray(&mut e_new as *mut _);
 
-    (0..b_dim).into_par_iter().for_each(|b| {
-        (0..h_dim).into_par_iter().for_each(|h| {
+    (0..b_dim).into_par_iter().for_each(move |b| {
+        (0..h_dim).into_par_iter().for_each(move |h| {
+            // Reconstruct pointers
+            let syn_logit_p = syn_logit_ptr.0;
+            let c_new_p = c_new_ptr.0;
+            let buf_new_p = buf_new_ptr.0;
+            let rrp_new_p = rrp_new_ptr.0;
+            let res_new_p = res_new_ptr.0;
+            let pr_new_p = pr_new_ptr.0;
+            let e_new_p = e_new_ptr.0;
+
             // Read-only slices
             let q_bh = q_arr.index_axis(Axis(0), b).index_axis(Axis(0), h);
             let k_bh = k_arr.index_axis(Axis(0), b).index_axis(Axis(0), h);
@@ -266,12 +267,12 @@ pub fn presyn_step_cpu<'py>(
                 
                 unsafe {
                     let idx = [b, h, t];
-                    (*c_new_ptr.0).uget_mut(idx).clone_from(&c_new_vec[t]);
-                    (*buf_new_ptr.0).uget_mut(idx).clone_from(&buf_new_vec[t]);
-                    (*rrp_new_ptr.0).uget_mut(idx).clone_from(&rrp_n);
-                    (*res_new_ptr.0).uget_mut(idx).clone_from(&res_n);
-                    (*pr_new_ptr.0).uget_mut(idx).clone_from(&pr_n);
-                    (*e_new_ptr.0).uget_mut(idx).clone_from(&e_n);
+                    (*c_new_p).uget_mut(idx).clone_from(&c_new_vec[t]);
+                    (*buf_new_p).uget_mut(idx).clone_from(&buf_new_vec[t]);
+                    (*rrp_new_p).uget_mut(idx).clone_from(&rrp_n);
+                    (*res_new_p).uget_mut(idx).clone_from(&res_n);
+                    (*pr_new_p).uget_mut(idx).clone_from(&pr_n);
+                    (*e_new_p).uget_mut(idx).clone_from(&e_n);
                 }
                 
                 for j in 0..=t {
@@ -280,12 +281,12 @@ pub fn presyn_step_cpu<'py>(
                     let val = (rel * qamp).max(c.epsilon).ln() - c.barrier_strength * dist;
                     
                     unsafe {
-                        (*syn_logit_ptr.0).uget_mut([b, h, t, j]).clone_from(&val);
+                        (*syn_logit_p).uget_mut([b, h, t, j]).clone_from(&val);
                     }
                 }
                 for j in (t+1)..t_dim {
                      unsafe {
-                        (*syn_logit_ptr.0).uget_mut([b, h, t, j]).clone_from(&c.epsilon.ln());
+                        (*syn_logit_p).uget_mut([b, h, t, j]).clone_from(&c.epsilon.ln());
                     }
                 }
             }
@@ -298,7 +299,7 @@ pub fn presyn_step_cpu<'py>(
     out_dict.set_item("RRP", rrp_new.into_pyarray(py))?;
     out_dict.set_item("RES", res_new.into_pyarray(py))?;
     out_dict.set_item("PR", pr_new.into_pyarray(py))?;
-    out_dict.set_item("CL", cl_tensor)?;
+    out_dict.set_item("CL", cl_tensor.as_array().to_owned().into_pyarray(py))?;
     out_dict.set_item("E", e_new.into_pyarray(py))?;
 
     Ok((syn_logit.into_pyarray(py).to_owned(), out_dict.to_owned()))
