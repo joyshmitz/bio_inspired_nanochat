@@ -315,8 +315,8 @@ class PostsynapticHebb(nn.Module):
         super().__init__()
         object.__setattr__(self, "cfg", cfg)
         R = cfg.rank_eligibility
-        self.register_buffer("U", torch.zeros(d_in, R))
-        self.register_buffer("V", torch.zeros(R, d_out))
+        self.register_buffer("U", torch.randn(d_in, R) * 0.01)
+        self.register_buffer("V", torch.randn(R, d_out) * 0.01)
         self.register_buffer("H_fast", torch.zeros(d_in, d_out))
         self.register_buffer("m_gate", torch.zeros(1))
         self.register_buffer("camkii", torch.zeros(1))
