@@ -288,6 +288,11 @@ def presyn_fused_kernel_forward(
             syn_logit = tl.log(release_frac * qamp + epsilon) - barrier_strength * dist
             
             # Add to existing logits
+            # Logits is (B, H, T, T). We are at (t, offsets).
+            # l_seq_ptr points to start of sequence (B, H).
+            # We need to write to row t, cols offsets.
+            # Stride t is Logits_stride_t. Stride k is Logits_stride_k.
+            # NOTE: Logits_stride_k is the stride for the last dimension (T), which is usually 1.
             l_ptr = l_seq_ptr + t * Logits_stride_t + offsets * Logits_stride_k
             curr_l = tl.load(l_ptr, mask=mask, other=0.0)
             tl.store(l_ptr, curr_l + syn_logit, mask=mask)

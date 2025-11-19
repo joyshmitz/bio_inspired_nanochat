@@ -84,7 +84,7 @@ uv run torchrun --nproc_per_node=2 --master_port=29500 \
     --model_tag="${MODEL_TAG}" \
     --depth=20 \
     --max_seq_len=2048 \
-    --device_batch_size=12 \
+    --device_batch_size=8 \
     --splitmerge_every=2000 \
     --merges_per_call=1 \
     --splits_per_call=2 \
