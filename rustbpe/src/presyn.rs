@@ -5,6 +5,11 @@ use pyo3::types::PyDict;
 use rayon::prelude::*;
 
 #[derive(Clone, Copy)]
+struct UnsafePtr<T>(*mut T);
+unsafe impl<T> Send for UnsafePtr<T> {}
+unsafe impl<T> Sync for UnsafePtr<T> {}
+
+#[derive(Clone, Copy)]
 struct Config {
     tau_c: f32,
     tau_buf: f32,
@@ -122,32 +127,71 @@ pub fn presyn_step_cpu<'py>(
     let rho_e = (-1.0 / c.tau_energy).exp();
     let sqrt_d = (d_dim as f32).sqrt();
 
-    // Wrapper for raw pointers to allow passing to rayon threads
-    #[derive(Clone, Copy)]
-    struct UnsafeArray<T>(*mut ArrayD<T>);
-    unsafe impl<T> Sync for UnsafeArray<T> {}
-    unsafe impl<T> Send for UnsafeArray<T> {}
-    
-    let syn_logit_ptr: UnsafeArray<f32> = UnsafeArray(&mut syn_logit as *mut _);
-    let c_new_ptr: UnsafeArray<f32> = UnsafeArray(&mut c_new as *mut _);
-    let buf_new_ptr: UnsafeArray<f32> = UnsafeArray(&mut buf_new as *mut _);
-    let rrp_new_ptr: UnsafeArray<f32> = UnsafeArray(&mut rrp_new as *mut _);
-    let res_new_ptr: UnsafeArray<f32> = UnsafeArray(&mut res_new as *mut _);
-    let pr_new_ptr: UnsafeArray<f32> = UnsafeArray(&mut pr_new as *mut _);
-    let e_new_ptr: UnsafeArray<f32> = UnsafeArray(&mut e_new as *mut _);
+    // Get raw pointers to output data
+    // We assume contiguous layout (standard for zeros())
+    let syn_logit_ptr = UnsafePtr(syn_logit.as_mut_ptr());
+    let c_new_ptr = UnsafePtr(c_new.as_mut_ptr());
+    let buf_new_ptr = UnsafePtr(buf_new.as_mut_ptr());
+    let rrp_new_ptr = UnsafePtr(rrp_new.as_mut_ptr());
+    let res_new_ptr = UnsafePtr(res_new.as_mut_ptr());
+    let pr_new_ptr = UnsafePtr(pr_new.as_mut_ptr());
+    let e_new_ptr = UnsafePtr(e_new.as_mut_ptr());
+
+    // Strides for flat indexing
+    // syn_logit: (B, H, T, T)
+    let stride_logits = t_dim * t_dim;
+    // state: (B, H, T)
+    let stride_state = t_dim;
 
     (0..b_dim).into_par_iter().for_each(move |b| {
         (0..h_dim).into_par_iter().for_each(move |h| {
-            // Reconstruct pointers with explicit types
-            let syn_logit_p: *mut ArrayD<f32> = syn_logit_ptr.0;
-            let c_new_p: *mut ArrayD<f32> = c_new_ptr.0;
-            let buf_new_p: *mut ArrayD<f32> = buf_new_ptr.0;
-            let rrp_new_p: *mut ArrayD<f32> = rrp_new_ptr.0;
-            let res_new_p: *mut ArrayD<f32> = res_new_ptr.0;
-            let pr_new_p: *mut ArrayD<f32> = pr_new_ptr.0;
-            let e_new_p: *mut ArrayD<f32> = e_new_ptr.0;
+            let offset_idx = b * h_dim + h;
+            
+            // Get mutable slices for this (b, h) block
+            let syn_logit_slice = unsafe {
+                std::slice::from_raw_parts_mut(
+                    syn_logit_ptr.0.add(offset_idx * stride_logits),
+                    stride_logits
+                )
+            };
+            let c_new_slice = unsafe {
+                std::slice::from_raw_parts_mut(
+                    c_new_ptr.0.add(offset_idx * stride_state),
+                    stride_state
+                )
+            };
+            let buf_new_slice = unsafe {
+                std::slice::from_raw_parts_mut(
+                    buf_new_ptr.0.add(offset_idx * stride_state),
+                    stride_state
+                )
+            };
+            let rrp_new_slice = unsafe {
+                std::slice::from_raw_parts_mut(
+                    rrp_new_ptr.0.add(offset_idx * stride_state),
+                    stride_state
+                )
+            };
+            let res_new_slice = unsafe {
+                std::slice::from_raw_parts_mut(
+                    res_new_ptr.0.add(offset_idx * stride_state),
+                    stride_state
+                )
+            };
+            let pr_new_slice = unsafe {
+                std::slice::from_raw_parts_mut(
+                    pr_new_ptr.0.add(offset_idx * stride_state),
+                    stride_state
+                )
+            };
+            let e_new_slice = unsafe {
+                std::slice::from_raw_parts_mut(
+                    e_new_ptr.0.add(offset_idx * stride_state),
+                    stride_state
+                )
+            };
 
-            // Read-only slices
+            // Read-only slices (using ndarray views)
             let q_bh = q_arr.index_axis(Axis(0), b).index_axis(Axis(0), h);
             let k_bh = k_arr.index_axis(Axis(0), b).index_axis(Axis(0), h);
             let logits_bh = logits_arr.index_axis(Axis(0), b).index_axis(Axis(0), h);
@@ -265,29 +309,24 @@ pub fn presyn_step_cpu<'py>(
                 
                 let qamp = sigmoid(c.q_beta * (e_n - 0.5)) * c.qmax;
                 
-                unsafe {
-                    let idx = [b, h, t];
-                    (*c_new_p).uget_mut(idx).clone_from(&c_new_vec[t]);
-                    (*buf_new_p).uget_mut(idx).clone_from(&buf_new_vec[t]);
-                    (*rrp_new_p).uget_mut(idx).clone_from(&rrp_n);
-                    (*res_new_p).uget_mut(idx).clone_from(&res_n);
-                    (*pr_new_p).uget_mut(idx).clone_from(&pr_n);
-                    (*e_new_p).uget_mut(idx).clone_from(&e_n);
-                }
+                // Write back state
+                c_new_slice[t] = c_new_vec[t];
+                buf_new_slice[t] = buf_new_vec[t];
+                rrp_new_slice[t] = rrp_n;
+                res_new_slice[t] = res_n;
+                pr_new_slice[t] = pr_n;
+                e_new_slice[t] = e_n;
                 
+                // Syn Logit
                 for j in 0..=t {
                     let rel = release_frac_bh[t][j];
                     let dist = ((t as f32) - (j as f32)).abs() / (t_dim.max(1) as f32);
                     let val = (rel * qamp).max(c.epsilon).ln() - c.barrier_strength * dist;
                     
-                    unsafe {
-                        (*syn_logit_p).uget_mut([b, h, t, j]).clone_from(&val);
-                    }
+                    syn_logit_slice[t * t_dim + j] = val;
                 }
                 for j in (t+1)..t_dim {
-                     unsafe {
-                        (*syn_logit_p).uget_mut([b, h, t, j]).clone_from(&c.epsilon.ln());
-                    }
+                     syn_logit_slice[t * t_dim + j] = c.epsilon.ln();
                 }
             }
         });
