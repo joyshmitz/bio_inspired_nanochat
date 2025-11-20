@@ -145,7 +145,7 @@ def _fit_2d(emb: np.ndarray) -> np.ndarray:
             return red.fit_transform(emb)
         except Exception:
             # UMAP failed (e.g. too few neighbors), fall back
-            pass
+            pass # nosec B110
             
     if _HAS_SKLEARN:
         return PCA(n_components=2).fit_transform(emb)
@@ -445,6 +445,10 @@ class NeuroVizManager:
         if self.tb is not None and step - self._last_tb >= self.cfg.tb_every:
             for name, moe in self.layers:
                 self._log_tb_layer(name, moe, step)
+            
+            # Log vitals to CSV frequently (same cadence as TB)
+            self._log_vitals(model, step, loss)
+            
             self._last_tb = step
 
         # Static images

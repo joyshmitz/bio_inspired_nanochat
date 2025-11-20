@@ -72,7 +72,7 @@ parser.add_argument('--synapses', type=int, default=0, help='Use synaptic model 
 parser.add_argument('-p', '--port', type=int, default=8000, help='Port to run the server on')
 parser.add_argument('-d', '--dtype', type=str, default='bfloat16', choices=['float32', 'bfloat16'])
 parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
-parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind the server to')
+parser.add_argument('--host', type=str, default='127.0.0.1', help='Host to bind the server to')
 args = parser.parse_args()
 
 # Configure logging for conversation traffic
@@ -113,7 +113,8 @@ class WorkerPool:
         """Load model on each GPU."""
         print(f"Initializing worker pool with {self.num_gpus} GPUs...")
         if self.num_gpus > 1:
-            assert device_type == "cuda", "Only CUDA supports multiple workers/GPUs. cpu|mps does not."
+            if device_type != "cuda":
+                raise ValueError("Only CUDA supports multiple workers/GPUs. cpu|mps does not.")
 
         for gpu_id in range(self.num_gpus):
 
@@ -243,7 +244,7 @@ app.add_middleware(
 @app.get("/")
 async def root():
     """Serve the chat UI."""
-    ui_html_path = os.path.join('bio_inspired_nanochat', "ui.html")
+    ui_html_path = os.path.join('bio_inspired_nanochat', "bio_nc_ui.html")
     with open(ui_html_path, "r", encoding="utf-8") as f:
         html_content = f.read()
     # Replace the API_URL to use the same origin
@@ -361,9 +362,12 @@ async def chat_completions(request: ChatRequest):
                     top_k=request.top_k
                 ):
                     # Accumulate response for logging
-                    chunk_data = json.loads(chunk.replace("data: ", "").strip())
-                    if "token" in chunk_data:
-                        response_tokens.append(chunk_data["token"])
+                    try:
+                        chunk_data = json.loads(chunk.replace("data: ", "").strip())
+                        if "token" in chunk_data:
+                            response_tokens.append(chunk_data["token"])
+                    except Exception:
+                        pass # Ignore parse errors for logging
                     yield chunk
             finally:
                 # Log the assistant response to console

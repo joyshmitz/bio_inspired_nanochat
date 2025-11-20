@@ -20,7 +20,7 @@ def run_command(cmd):
     try:
         if isinstance(cmd, str):
             cmd = shlex.split(cmd)
-        result = subprocess.run(cmd, shell=False, capture_output=True, text=True, timeout=5)
+        result = subprocess.run(cmd, shell=False, capture_output=True, text=True, timeout=5) # nosec B603
         if result.returncode == 0:
             return result.stdout.strip()
         return None
