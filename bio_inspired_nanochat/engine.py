@@ -89,10 +89,12 @@ class KVCache:
         # Each of K/V is of shape (B, H, T, D) and we have one per layer of the Transformer.
         self.kv_shape = (num_layers, 2, batch_size, num_heads, seq_len, head_dim)
         self.kv_cache = None
+        self.presyn_state = None # Biological state (RRP, Calcium, etc.)
         self.pos = 0 # current position in time in the cache
 
     def reset(self):
         self.pos = 0
+        self.presyn_state = None
 
     def get_pos(self):
         return self.pos
@@ -124,6 +126,32 @@ class KVCache:
         self.kv_cache[:, :, :, :, :other.pos, :] = other.kv_cache
         # 4) update the pos
         self.pos = other.pos
+        # 5) copy presyn_state if exists
+        if other.presyn_state is not None:
+            self.presyn_state = {}
+            target_B = self.kv_shape[2]
+            src_B = other.kv_shape[2] # Assuming other.kv_shape is correct
+            
+            for k, v in other.presyn_state.items():
+                if isinstance(v, list):
+                     # delay queue is a list of tensors
+                     self.presyn_state[k] = []
+                     for t in v:
+                         if isinstance(t, torch.Tensor):
+                             if src_B == 1 and target_B > 1:
+                                 # Expand batch dim
+                                 self.presyn_state[k].append(t.expand(target_B, *t.shape[1:]).clone())
+                             else:
+                                 self.presyn_state[k].append(t.clone())
+                         else:
+                             self.presyn_state[k].append(t)
+                elif isinstance(v, torch.Tensor):
+                     if src_B == 1 and target_B > 1:
+                         self.presyn_state[k] = v.expand(target_B, *v.shape[1:]).clone()
+                     else:
+                         self.presyn_state[k] = v.clone()
+                else:
+                    self.presyn_state[k] = v
 
     def insert_kv(self, layer_idx, k, v):
         # Lazy initialize the cache here because we need to know the dtype/device
@@ -190,7 +218,7 @@ class Engine:
         self.tokenizer = tokenizer # needed for tool use
 
     @torch.inference_mode()
-    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
+    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42, yield_metrics=False):
         """Same as generate, but does single prefill and then clones the KV cache."""
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         device = self.model.get_device()
@@ -301,7 +329,79 @@ class Engine:
                     state.python_expr_tokens.append(next_token)
 
             # Yield the token column
-            yield token_column, token_masks
+            if yield_metrics:
+                # Extract metrics
+                metrics = {}
+                
+                # 1. MoE Stats (Gates, Indices)
+                # We scan layers for SynapticMoE
+                moe_stats = []
+                if hasattr(self.model, 'h'):
+                    for i, block in enumerate(self.model.h):
+                        if hasattr(block, 'mlp') and hasattr(block.mlp, 'last_ctx'):
+                            ctx = block.mlp.last_ctx
+                            if ctx:
+                                # ctx has 'gates', 'indices', 'x'
+                                # We want gates (B, 1, K) probably?
+                                # Note: in generate, we process 1 token step.
+                                # gates shape is (B, 1, K) typically.
+                                # We convert to simple list
+                                gates = ctx.get('gates')
+                                indices = ctx.get('indices')
+                                if gates is not None and indices is not None:
+                                    # Just take the first batch item for visualization simplicity if num_samples > 1?
+                                    # Or return all. Let's return list of lists.
+                                    moe_stats.append({
+                                        "layer": i,
+                                        "gates": gates.float().cpu().numpy().tolist(),
+                                        "indices": indices.cpu().numpy().tolist()
+                                    })
+                metrics['moe'] = moe_stats
+                
+                # 2. Presynaptic Stats (RRP, C)
+                if kv_cache_decode.presyn_state:
+                    presyn_stats = {}
+                    for k in ['c', 'rrp', 'sn', 'cl', 'en']:
+                        if k in kv_cache_decode.presyn_state:
+                            t = kv_cache_decode.presyn_state[k] # (B, H, T)
+                            # Get last step
+                            if t.shape[-1] > 0:
+                                last_val = t[..., -1] # (B, H)
+                                presyn_stats[k] = last_val.float().cpu().numpy().tolist()
+                    metrics['presyn'] = presyn_stats
+
+                # 3. Postsynaptic Memory Stats (CaMKII - Long Term Potentiation)
+                # This represents "how much the model is learning/writing to memory" at this step
+                memory_stats = []
+                if hasattr(self.model, 'h'):
+                    for block in self.model.h:
+                        layer_camkii = []
+                        # Check MLP
+                        if hasattr(block, 'mlp'):
+                            # Case 1: MoE
+                            if hasattr(block.mlp, 'experts'):
+                                for exp in block.mlp.experts:
+                                    # Check fc1 and fc2
+                                    if hasattr(exp, 'fc1') and hasattr(exp.fc1, 'post') and hasattr(exp.fc1.post, 'camkii'):
+                                        layer_camkii.append(exp.fc1.post.camkii.mean().item())
+                                    if hasattr(exp, 'fc2') and hasattr(exp.fc2, 'post') and hasattr(exp.fc2.post, 'camkii'):
+                                        layer_camkii.append(exp.fc2.post.camkii.mean().item())
+                            # Case 2: Standard Synaptic MLP
+                            elif hasattr(block.mlp, 'fc') and hasattr(block.mlp.fc, 'post') and hasattr(block.mlp.fc.post, 'camkii'):
+                                layer_camkii.append(block.mlp.fc.post.camkii.mean().item())
+                                if hasattr(block.mlp, 'proj') and hasattr(block.mlp.proj, 'post') and hasattr(block.mlp.proj.post, 'camkii'):
+                                    layer_camkii.append(block.mlp.proj.post.camkii.mean().item())
+                        
+                        if layer_camkii:
+                            memory_stats.append(sum(layer_camkii) / len(layer_camkii))
+                        else:
+                            memory_stats.append(0.0)
+                metrics['memory'] = memory_stats
+
+                yield token_column, token_masks, metrics
+            else:
+                yield token_column, token_masks
+            
             num_generated += 1
             # Prepare ids for next iteration
             ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
