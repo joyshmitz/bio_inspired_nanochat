@@ -20,8 +20,6 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
     where S' is diagonal with S_{ii}' ~ Uniform(0.5, 1.5), which turns out not to hurt model
     performance at all relative to UV^T, where USV^T = G is the SVD.
     """
-    which has the advantage that it can be stably run in bfloat16 on the GPU.
-    """
     if G.ndim < 2:
         raise ValueError("Muon expects 2D parameters only") # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
     a, b, c = (3.4445, -4.7750,  2.0315)
