@@ -14,12 +14,13 @@ Notable features:
 import math
 from functools import partial
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from bio_inspired_nanochat.common import get_dist_info
+from bio_inspired_nanochat.common import ca_init_weight_, get_dist_info
 from bio_inspired_nanochat.muon import Muon, DistMuon
 from bio_inspired_nanochat.adamw import DistAdamW
 
@@ -31,6 +32,17 @@ class GPTConfig:
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
+    # Attention mechanism switch (experimental)
+    attention_type: str = "standard"  # "standard" | "ultrametric"
+    # Ultrametric (p-adic / LCP-kernel) attention hyperparams
+    ultrametric_k: int = 8
+    ultrametric_p: int = 2
+    ultrametric_alpha: float = 2.0
+    ultrametric_lcp_beta: float = 32.0
+    ultrametric_query_chunk_size: int = 64
+    # Weight initialization
+    init_type: str = "baseline"  # "baseline" | "ca_rule30" | "ca_rule116"
+    init_seed: int = 42
 
 
 def norm(x):
@@ -47,6 +59,37 @@ def apply_rotary_emb(x, cos, sin):
     out = torch.cat([y1, y2], 3) # re-assemble
     out = out.to(x.dtype) # ensure input/output dtypes match
     return out
+
+
+def _repeat_kv_heads(x: torch.Tensor, *, n_head: int) -> torch.Tensor:
+    """Repeat KV heads to match query heads (manual GQA handling)."""
+    if x.size(1) == n_head:
+        return x
+    n_kv = x.size(1)
+    if n_kv <= 0 or n_head % n_kv != 0:
+        raise ValueError(f"Invalid GQA: n_head={n_head}, n_kv_head={n_kv}")
+    return x.repeat_interleave(n_head // n_kv, dim=1)
+
+
+def _autoregressive_keep_mask(
+    *,
+    Tq: int,
+    Tk: int,
+    kv_cache,
+    device: torch.device,
+) -> torch.Tensor:
+    """Return bool keep-mask shaped (Tq, Tk) for autoregressive attention."""
+    if kv_cache is None or Tq == Tk:
+        return torch.tril(torch.ones((Tq, Tk), dtype=torch.bool, device=device))
+    if Tq == 1:
+        return torch.ones((Tq, Tk), dtype=torch.bool, device=device)
+    prefix_len = Tk - Tq
+    keep = torch.zeros((Tq, Tk), dtype=torch.bool, device=device)
+    if prefix_len > 0:
+        keep[:, :prefix_len] = True
+    keep[:, prefix_len:] = torch.tril(torch.ones((Tq, Tq), dtype=torch.bool, device=device))
+    return keep
+
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, config, layer_idx):
@@ -110,6 +153,132 @@ class CausalSelfAttention(nn.Module):
         return y
 
 
+class UltrametricCausalSelfAttention(nn.Module):
+    """Ultrametric (p-adic / LCP-kernel) causal attention (dense, chunked).
+
+    This is a prototype port of the MGR idea. It is still O(T^2) compute, but
+    query-chunked to avoid allocating an (Tq×Tk×K) tensor.
+    """
+
+    _ultra_p_minus_1: torch.Tensor
+    _ultra_lcp_beta: torch.Tensor
+    _ultra_log_alpha: torch.Tensor
+    _ultra_query_chunk_size: int
+
+    def __init__(self, config, layer_idx):
+        super().__init__()
+        self.layer_idx = layer_idx
+        self.n_head = config.n_head
+        self.n_kv_head = config.n_kv_head
+        self.n_embd = config.n_embd
+        self.head_dim = self.n_embd // self.n_head
+        assert self.n_embd % self.n_head == 0
+        assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
+
+        self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
+        self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+
+        K = int(config.ultrametric_k)
+        p = int(config.ultrametric_p)
+        alpha = float(config.ultrametric_alpha)
+        lcp_beta = float(config.ultrametric_lcp_beta)
+        query_chunk_size = int(config.ultrametric_query_chunk_size)
+
+        if K <= 0:
+            raise ValueError("ultrametric_k must be > 0")
+        if p < 2:
+            raise ValueError("ultrametric_p must be >= 2")
+        if alpha <= 1.0:
+            raise ValueError("ultrametric_alpha must be > 1")
+        if query_chunk_size <= 0:
+            raise ValueError("ultrametric_query_chunk_size must be > 0")
+
+        self.register_buffer("_ultra_p_minus_1", torch.tensor(float(p - 1), dtype=torch.float32), persistent=False)
+        self.register_buffer(
+            "_ultra_lcp_beta",
+            torch.tensor(lcp_beta, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_ultra_log_alpha",
+            torch.tensor(math.log(alpha), dtype=torch.float32),
+            persistent=False,
+        )
+        object.__setattr__(self, "_ultra_query_chunk_size", query_chunk_size)
+
+        # Learned per-head projections into K "digits" used for an LCP-kernel.
+        self.to_digits_q = nn.Linear(self.head_dim, K, bias=False)
+        self.to_digits_k = nn.Linear(self.head_dim, K, bias=False)
+
+    def forward(self, x, cos_sin, kv_cache):
+        B, T, _C = x.size()
+
+        q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
+        k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
+        v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
+
+        cos, sin = cos_sin
+        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
+        q, k = norm(q), norm(k)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)  # (B,H,T,D)
+
+        if kv_cache is not None:
+            k, v = kv_cache.insert_kv(self.layer_idx, k, v)
+
+        # Expand KV heads for manual GQA.
+        if self.n_kv_head != self.n_head:
+            k = _repeat_kv_heads(k, n_head=self.n_head)
+            v = _repeat_kv_heads(v, n_head=self.n_head)
+
+        Tq = q.size(2)
+        Tk = k.size(2)
+        keep = _autoregressive_keep_mask(Tq=Tq, Tk=Tk, kv_cache=kv_cache, device=q.device)
+
+        # Soft digits in [0, p-1] (continuous relaxation).
+        q_digits = torch.sigmoid(self.to_digits_q(q.to(dtype=torch.float32))) * self._ultra_p_minus_1
+        k_digits = torch.sigmoid(self.to_digits_k(k.to(dtype=torch.float32))) * self._ultra_p_minus_1
+
+        out = torch.empty((B, self.n_head, Tq, self.head_dim), dtype=v.dtype, device=v.device)
+
+        query_chunk_size = self._ultra_query_chunk_size
+        K = q_digits.size(-1)
+
+        for qs in range(0, Tq, query_chunk_size):
+            qe = min(Tq, qs + query_chunk_size)
+            qd = q_digits[:, :, qs:qe, :]  # (B,H,qchunk,K)
+
+            prefix = torch.ones((B, self.n_head, qe - qs, Tk), dtype=torch.float32, device=q.device)
+            lcp = torch.zeros_like(prefix)
+            for d in range(K):
+                diff = qd[..., d].unsqueeze(-1) - k_digits[..., d].unsqueeze(-2)
+                match = torch.exp(-self._ultra_lcp_beta * diff.square())
+                prefix.mul_(match)
+                lcp.add_(prefix)
+
+            weights = torch.exp(lcp * self._ultra_log_alpha)
+            keep_chunk = keep[qs:qe].unsqueeze(0).unsqueeze(0)  # (1,1,qchunk,Tk)
+            weights = weights.masked_fill(~keep_chunk, 0.0)
+            denom = weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+            attn = (weights / denom).to(dtype=v.dtype)
+
+            out[:, :, qs:qe, :] = attn @ v
+
+        y = out.transpose(1, 2).contiguous().view(B, Tq, -1)
+        y = self.c_proj(y)
+        return y
+
+
+def _build_attention(config: GPTConfig, layer_idx: int) -> nn.Module:
+    attn_type = str(getattr(config, "attention_type", "standard"))
+    if attn_type == "standard":
+        return CausalSelfAttention(config, layer_idx)
+    if attn_type == "ultrametric":
+        return UltrametricCausalSelfAttention(config, layer_idx)
+    raise ValueError(f"Unknown attention_type={attn_type!r}")
+
+
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -126,7 +295,7 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
-        self.attn = CausalSelfAttention(config, layer_idx)
+        self.attn = _build_attention(config, layer_idx)
         self.mlp = MLP(config)
 
     def forward(self, x, cos_sin, kv_cache):
@@ -154,21 +323,61 @@ class GPT(nn.Module):
         self.register_buffer("cos", cos, persistent=False) # persistent=False means it's not saved to the checkpoint
         self.register_buffer("sin", sin, persistent=False)
 
+    @property
+    def wte(self) -> nn.Embedding:
+        return cast(nn.Embedding, self.transformer["wte"])
+
+    @property
+    def blocks(self) -> nn.ModuleList:
+        return cast(nn.ModuleList, self.transformer["h"])
+
     def init_weights(self):
-        self.apply(self._init_weights)
+        init_type = str(getattr(self.config, "init_type", "baseline"))
+        if init_type.startswith("ca_") or init_type.startswith("ca"):
+            self._init_weights_ca()
+        else:
+            self.apply(self._init_weights)
         # zero out classifier weights
         torch.nn.init.zeros_(self.lm_head.weight)
         # zero out c_proj weights in all blocks
-        for block in self.transformer.h:
-            torch.nn.init.zeros_(block.mlp.c_proj.weight)
-            torch.nn.init.zeros_(block.attn.c_proj.weight)
+        for block in self.blocks:
+            torch.nn.init.zeros_(cast(torch.Tensor, block.mlp.c_proj.weight))
+            torch.nn.init.zeros_(cast(torch.Tensor, block.attn.c_proj.weight))
         # init the rotary embeddings
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.cos, self.sin = cos, sin
         # Cast the embeddings from fp32 to bf16: optim can tolerate it and it saves memory: both in the model and the activations
-        if self.transformer.wte.weight.device.type == "cuda":
-            self.transformer.wte.to(dtype=torch.bfloat16)
+        if self.wte.weight.device.type == "cuda":
+            self.wte.to(dtype=torch.bfloat16)
+
+    def _init_weights_ca(self) -> None:
+        init_type = str(getattr(self.config, "init_type", "ca_rule30"))
+        init_seed = int(getattr(self.config, "init_seed", 42))
+        rule = 116 if "116" in init_type else 30
+
+        # Avoid pathological init-time overhead for very large "out" dims (e.g. lm_head).
+        max_ca_fan_out = 8192
+
+        for module_name, module in self.named_modules():
+            if module is self:
+                continue
+            if isinstance(module, nn.Linear):
+                fan_out = int(module.weight.size(0))
+                if fan_out > max_ca_fan_out:
+                    self._init_weights(module)
+                else:
+                    ca_init_weight_(
+                        module.weight,
+                        rule=rule,
+                        seed=init_seed,
+                        salt=f"{module_name}.weight",
+                        layout="out_in",
+                    )
+                    if module.bias is not None:
+                        torch.nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Embedding):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=1.0)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -186,7 +395,7 @@ class GPT(nn.Module):
     def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None):
         # autodetect the device from model embeddings
         if device is None:
-            device = self.transformer.wte.weight.device
+            device = self.wte.weight.device
         # stride the channels
         channel_range = torch.arange(0, head_dim, 2, dtype=torch.float32, device=device)
         inv_freq = 1.0 / (base ** (channel_range / head_dim))
@@ -200,22 +409,27 @@ class GPT(nn.Module):
         return cos, sin
 
     def get_device(self):
-        return self.transformer.wte.weight.device
+        return self.wte.weight.device
 
     def estimate_flops(self):
         """ Return the estimated FLOPs per token for the model. Ref: https://arxiv.org/abs/2204.02311 """
         nparams = sum(p.numel() for p in self.parameters())
-        nparams_embedding = self.transformer.wte.weight.numel()
-        l, h, q, t = self.config.n_layer, self.config.n_head, self.config.n_embd // self.config.n_head, self.config.sequence_len
-        num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
+        nparams_embedding = self.wte.weight.numel()
+        n_layers = self.config.n_layer
+        n_heads = self.config.n_head
+        head_dim = self.config.n_embd // self.config.n_head
+        seq_len = self.config.sequence_len
+        num_flops_per_token = (
+            6 * (nparams - nparams_embedding) + 12 * n_layers * n_heads * head_dim * seq_len
+        )
         return num_flops_per_token
 
     def setup_optimizers(self, unembedding_lr=0.004, embedding_lr=0.2, matrix_lr=0.02, weight_decay=0.0):
         model_dim = self.config.n_embd
         ddp, rank, local_rank, world_size = get_dist_info()
         # Separate out all parameters into 3 groups (matrix, embedding, lm_head)
-        matrix_params = list(self.transformer.h.parameters())
-        embedding_params = list(self.transformer.wte.parameters())
+        matrix_params = list(self.blocks.parameters())
+        embedding_params = list(self.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
         assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
         # Create the AdamW optimizer for the embedding and lm_head
@@ -228,7 +442,8 @@ class GPT(nn.Module):
             dict(params=embedding_params, lr=embedding_lr * dmodel_lr_scale),
         ]
         adamw_kwargs = dict(betas=(0.8, 0.95), eps=1e-10, weight_decay=weight_decay)
-        AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
+        use_fused = (not ddp) and any(p.is_cuda for p in (embedding_params + lm_head_params))
+        AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=use_fused)
         adamw_optimizer = AdamWFactory(adam_groups, **adamw_kwargs)
         # Create the Muon optimizer for the linear layers
         muon_kwargs = dict(lr=matrix_lr, momentum=0.95)
@@ -253,9 +468,9 @@ class GPT(nn.Module):
         cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T] # truncate cache to current sequence length
 
         # Forward the trunk of the Transformer
-        x = self.transformer.wte(idx)
+        x = self.wte(idx)
         x = norm(x)
-        for block in self.transformer.h:
+        for block in self.blocks:
             x = block(x, cos_sin, kv_cache)
         x = norm(x)
 
@@ -267,7 +482,14 @@ class GPT(nn.Module):
             logits = self.lm_head(x)
             logits = softcap * torch.tanh(logits / softcap) # logits softcap
             logits = logits.float() # use tf32/fp32 for logits
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
+            logits_flat = logits.reshape(-1, logits.size(-1))
+            targets_flat = targets.reshape(-1)
+            loss = F.cross_entropy(
+                logits_flat,
+                targets_flat,
+                ignore_index=-1,
+                reduction=loss_reduction,
+            )
             return loss
         else:
             # inference mode: compute and return the logits

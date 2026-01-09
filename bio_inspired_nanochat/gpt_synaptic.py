@@ -1,23 +1,25 @@
 # nanochat/gpt_synaptic.py
 # pylint: disable=too-many-instance-attributes
 from __future__ import annotations
+
 # GPT with Synaptic Attention/MLP and optional Synaptic MoE + structural hooks
 
-from bio_inspired_nanochat.torch_imports import torch, nn, F, Tensor
 from dataclasses import dataclass, field
 from typing import Optional
 
-try:
-    from .flex_synaptic import SynapticFlexAttention
-    _HAS_FLEX = True
-except ImportError:
-    _HAS_FLEX = False
+from bio_inspired_nanochat.torch_imports import torch, nn, F, Tensor
+
+from bio_inspired_nanochat.common import ca_init_weight_
 
 from .synaptic import (
+    PostsynapticHebb,
     SynapticCausalSelfAttention,
     SynapticMLP,
     SynapticConfig,
     SynapticMoE,
+    SynapticLinear,
+    SynapticPresyn,
+    StructuralPlasticity,
 )
 
 
@@ -38,7 +40,6 @@ class GPTSynapticConfig:
     synapses: bool = True
     syn_cfg: SynapticConfig = field(default_factory=SynapticConfig)
     dropout: float = 0.0
-    use_flex_attention: bool = False # Toggle for PyTorch 2.5+ FlexAttention
     # MoE & structural options
     use_moe: bool = False
     num_experts: int = 8
@@ -46,6 +47,9 @@ class GPTSynapticConfig:
     moe_hidden_mult: int = 4
     moe_balance_loss: float = 0.01
     structural_every: int = 0  # 0 → off; >0 → run hooks every N blocks
+    # Weight initialization
+    init_type: str = "baseline"  # "baseline" | "ca_rule30" | "ca_rule116"
+    init_seed: int = 42
 
 
 # -----------------------------------------------------------------------------
@@ -65,6 +69,7 @@ class MLP(nn.Module):
 class CausalSelfAttention(nn.Module):
     def __init__(
         self,
+        layer_idx: int,
         n_embd: int,
         n_head: int,
         n_kv_head: int,
@@ -73,7 +78,6 @@ class CausalSelfAttention(nn.Module):
         syn_cfg: SynapticConfig,
         attn_drop=0.0,
         resid_drop=0.0,
-        use_flex: bool = False,
     ):
         super().__init__()
         self.attn = SynapticCausalSelfAttention(
@@ -83,9 +87,9 @@ class CausalSelfAttention(nn.Module):
             rope_cos,
             rope_sin,
             syn_cfg,
+            layer_idx,
             attn_drop,
             resid_drop,
-            use_flex=use_flex,
         )
 
     def forward(self, x, kv_cache=None, presyn_state=None, train_mode=True):
@@ -96,6 +100,7 @@ class CausalSelfAttention(nn.Module):
 class Block(nn.Module):
     def __init__(
         self,
+        layer_idx: int,
         n_embd: int,
         n_head: int,
         n_kv_head: int,
@@ -108,11 +113,11 @@ class Block(nn.Module):
         top_k: int = 2,
         hidden_mult: int = 4,
         balance_loss: float = 0.01,
-        use_flex: bool = False,
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(n_embd)
         self.attn = CausalSelfAttention(
+            layer_idx,
             n_embd,
             n_head,
             n_kv_head,
@@ -121,7 +126,6 @@ class Block(nn.Module):
             syn_cfg,
             attn_drop=dropout,
             resid_drop=dropout,
-            use_flex=use_flex,
         )
         self.norm2 = nn.LayerNorm(n_embd)
         self.use_moe: bool = use_moe
@@ -179,8 +183,10 @@ class GPTSynaptic(nn.Module):
             "sin", torch.sin(freqs).unsqueeze(0).to(torch.bfloat16), persistent=False
         )
         for _ in range(c.n_layer):
+            layer_idx = len(self.h)
             self.h.append(
                 Block(
+                    layer_idx,
                     c.n_embd,
                     c.n_head,
                     c.n_kv_head,
@@ -193,7 +199,6 @@ class GPTSynaptic(nn.Module):
                     top_k=c.moe_top_k,
                     hidden_mult=c.moe_hidden_mult,
                     balance_loss=c.moe_balance_loss,
-                    use_flex=c.use_flex_attention,
                 )
             )
 
@@ -213,15 +218,47 @@ class GPTSynaptic(nn.Module):
         B, T = idx.size()
         assert T <= self.config.sequence_len
         tok = self.wte(idx)
-        x = self.drop(tok.to(dtype=torch.bfloat16))
+        x = self.drop(tok)
         
-        # Initialize presyn_state from kv_cache if available
-        presyn_state = None
-        if kv_cache is not None and hasattr(kv_cache, 'presyn_state'):
-            presyn_state = kv_cache.presyn_state
+        # Initialize per-layer presynaptic state from kv_cache if available
+        presyn_states = None
+        if kv_cache is not None and hasattr(kv_cache, "presyn_state"):
+            presyn_states = kv_cache.presyn_state
+
+        def _clone_presyn_state(state):
+            if state is None:
+                return None
+            cloned = {}
+            for key, value in state.items():
+                if isinstance(value, list):
+                    new_queue = []
+                    for item in value:
+                        if torch.is_tensor(item):
+                            new_queue.append(item.clone())
+                        else:
+                            new_queue.append(item)
+                    cloned[key] = new_queue
+                elif torch.is_tensor(value):
+                    cloned[key] = value.clone()
+                else:
+                    cloned[key] = value
+            return cloned
+
+        if isinstance(presyn_states, list):
+            if len(presyn_states) < len(self.h):
+                presyn_states = presyn_states + [None] * (len(self.h) - len(presyn_states))
+            elif len(presyn_states) > len(self.h):
+                presyn_states = presyn_states[: len(self.h)]
+        elif isinstance(presyn_states, dict):
+            # Backward-compat: expand a single dict into per-layer copies
+            presyn_states = [_clone_presyn_state(presyn_states) for _ in range(len(self.h))]
+        else:
+            presyn_states = [None] * len(self.h)
 
         for li, block in enumerate(self.h):
-            x, presyn_state = block(x, kv_cache, presyn_state, train_mode)
+            layer_state = presyn_states[li]
+            x, layer_state = block(x, kv_cache, layer_state, train_mode)
+            presyn_states[li] = layer_state
             if self.config.structural_every and targets is not None:
                 if (li + 1) % self.config.structural_every == 0 and hasattr(
                     block.mlp, "experts"
@@ -232,7 +269,7 @@ class GPTSynaptic(nn.Module):
         # Save presyn_state back to kv_cache
         if kv_cache is not None:
             # We attach it dynamically if it doesn't exist in __init__ yet (though we should add it there too)
-            kv_cache.presyn_state = presyn_state
+            kv_cache.presyn_state = presyn_states
 
         logits = self.lm_head(x.to(dtype=self.lm_head.weight.dtype))
         if targets is None:
@@ -243,8 +280,13 @@ class GPTSynaptic(nn.Module):
                 for b in self.h
             )
         )
+        logits_flat = logits.reshape(-1, logits.size(-1))
+        targets_flat = targets.reshape(-1)
         ce = F.cross_entropy(
-            logits.view(-1, logits.size(-1)), targets.view(-1), reduction="mean"
+            logits_flat,
+            targets_flat,
+            ignore_index=-1,
+            reduction="mean",
         )
         loss = ce + aux
         return logits, loss
@@ -318,7 +360,9 @@ class GPTSynaptic(nn.Module):
                 dict(params=other_params, lr=embedding_lr * dmodel_lr_scale), # Use embedding LR scale for other params? Or maybe just matrix_lr? Usually AdamW params get higher LR.
             ]
             adamw_kwargs = dict(betas=(0.8, 0.95), eps=1e-10, weight_decay=weight_decay)
-            AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=True)
+            adam_params = embedding_params + lm_head_params + other_params
+            use_fused = (not ddp) and any(p.is_cuda for p in adam_params)
+            AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=use_fused)
             adamw_optimizer = AdamWFactory(adam_groups, **adamw_kwargs)
             
             muon_kwargs = dict(lr=matrix_lr, momentum=0.95)
@@ -330,10 +374,154 @@ class GPTSynaptic(nn.Module):
                     group["initial_lr"] = group["lr"]
             return optimizers
 
+    @torch.no_grad()
     def init_weights(self):
-        """Initialize weights (needed for checkpoint loading compatibility)."""
-        # RoPE buffers are already initialized in __init__
-        pass
+        """Initialize weights after `to_empty` (meta-device safe)."""
+        init_type = str(getattr(self.config, "init_type", "baseline"))
+        init_seed = int(getattr(self.config, "init_seed", 42))
+
+        # 1) Baseline initialization (mirrors what we'd want on a non-meta constructor path).
+        for module_name, module in self.named_modules():
+            if module is self:
+                continue
+
+            if isinstance(module, nn.Linear):
+                if module_name == "lm_head":
+                    nn.init.trunc_normal_(module.weight, std=0.02)
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+                else:
+                    module.reset_parameters()
+                continue
+
+            if isinstance(module, nn.Embedding):
+                module.reset_parameters()
+                continue
+
+            if isinstance(module, SynapticLinear):
+                nn.init.trunc_normal_(module.w_slow, std=0.02)
+                if module.w_fast is not None:
+                    nn.init.trunc_normal_(module.w_fast, std=0.02)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+                if module.u_buf is not None:
+                    module.u_buf.zero_()
+                if module.v_buf is not None:
+                    module.v_buf.zero_()
+                continue
+
+            if isinstance(module, PostsynapticHebb):
+                module.fast.zero_()
+                module.slow.zero_()
+                nn.init.normal_(module.U, std=0.02)
+                nn.init.normal_(module.V, std=0.02)
+                module.camkii.zero_()
+                module.pp1.fill_(0.5)
+                module.bdnf.zero_()
+                if hasattr(module, "bdnf_hebb_accum"):
+                    module.bdnf_hebb_accum.zero_()
+                if hasattr(module, "_last_hebb_delta_mag"):
+                    module._last_hebb_delta_mag.zero_()
+                continue
+
+            if isinstance(module, SynapticPresyn):
+                module.ema_e.fill_(1.0)
+                continue
+
+            if isinstance(module, SynapticMLP):
+                module.C0.fill_(0.5)
+                module.E0.fill_(0.8)
+                continue
+
+            if isinstance(module, SynapticMoE):
+                module.fatigue.zero_()
+                module.energy.fill_(1.0)
+                emb = torch.randn(
+                    module.num_experts,
+                    module.cfg.router_embed_dim,
+                    device=module.router_embeddings.device,
+                    dtype=module.router_embeddings.dtype,
+                )
+                emb = emb / (emb.norm(dim=-1, keepdim=True) + 1e-8)
+                module.router_embeddings.copy_(emb)
+                nn.init.normal_(module.Xi, std=0.1)
+                continue
+
+            if isinstance(module, StructuralPlasticity):
+                module.age.zero_()
+                module.util.zero_()
+                continue
+
+            if hasattr(module, "reset_parameters"):
+                module.reset_parameters()
+
+        # 2) Optional CA override for selected matrices (keeps embeddings/head baseline).
+        if init_type.startswith("ca_") or init_type.startswith("ca"):
+            rule = 116 if "116" in init_type else 30
+            max_ca_fan_out = 8192
+
+            for module_name, module in self.named_modules():
+                if module is self:
+                    continue
+
+                if isinstance(module, nn.Linear):
+                    if module_name == "lm_head":
+                        continue
+                    fan_out = int(module.weight.size(0))
+                    if fan_out > max_ca_fan_out:
+                        continue
+                    ca_init_weight_(
+                        module.weight,
+                        rule=rule,
+                        seed=init_seed,
+                        salt=f"{module_name}.weight",
+                        layout="out_in",
+                    )
+                    if module.bias is not None:
+                        nn.init.zeros_(module.bias)
+                    continue
+
+                if isinstance(module, SynapticLinear):
+                    fan_out = int(module.w_slow.size(1))
+                    if fan_out > max_ca_fan_out:
+                        continue
+                    ca_init_weight_(
+                        module.w_slow,
+                        rule=rule,
+                        seed=init_seed,
+                        salt=f"{module_name}.w_slow",
+                        layout="in_out",
+                    )
+                    if module.w_fast is not None:
+                        ca_init_weight_(
+                            module.w_fast,
+                            rule=rule,
+                            seed=init_seed,
+                            salt=f"{module_name}.w_fast",
+                            layout="in_out",
+                        )
+                    continue
+
+        # 3) Rebuild RoPE buffers (meta-device safe) and re-link attention modules.
+        T = int(self.config.sequence_len)
+        hd = int(self.config.n_embd // self.config.n_head)
+        base = float(self.config.rope_base)
+        device = self.wte.weight.device
+
+        inv_freq: Tensor = 1.0 / (
+            base ** (torch.arange(0, hd // 2, dtype=torch.float32, device=device) / (hd // 2))
+        )
+        t: Tensor = torch.arange(0, T * 8, dtype=torch.float32, device=device)
+        freqs: Tensor = torch.outer(t, inv_freq)
+        cos = torch.cos(freqs).unsqueeze(0).to(torch.bfloat16)
+        sin = torch.sin(freqs).unsqueeze(0).to(torch.bfloat16)
+        self.cos.copy_(cos)
+        self.sin.copy_(sin)
+
+        for _, module in self.named_modules():
+            if isinstance(module, SynapticCausalSelfAttention):
+                module.cos = self.cos
+                module.sin = self.sin
 
     def get_device(self):
         return self.wte.weight.device
