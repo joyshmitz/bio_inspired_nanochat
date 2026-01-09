@@ -22,6 +22,7 @@
 
 import importlib
 import importlib.util
+import csv
 import os
 import json
 import time
@@ -30,10 +31,14 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING, cast
 
 import numpy as np
 from bio_inspired_nanochat.torch_imports import torch, nn, Tensor
+from torch.utils.tensorboard import SummaryWriter
 import matplotlib
+
+from .synaptic import SynapticExpert, SynapticMoE
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
 
 def _maybe_import(module: str, attr: Optional[str] = None) -> Any:
     spec = importlib.util.find_spec(module)
@@ -49,11 +54,6 @@ PCA = _maybe_import("sklearn.decomposition", "PCA")
 _HAS_SKLEARN = PCA is not None
 go = _maybe_import("plotly.graph_objects")
 _HAS_PLOTLY = go is not None
-
-from torch.utils.tensorboard import SummaryWriter
-
-# lazy import to avoid circulars
-from .synaptic import SynapticMoE, SynapticExpert
 
 if TYPE_CHECKING:
     from .neuroscore import NeuroScore, NeuroScoreConfig
@@ -89,7 +89,7 @@ def _reduce_camkii(expert: SynapticExpert) -> float:
     for fc in (expert.fc1, expert.fc2):
         if hasattr(fc, "post") and hasattr(fc.post, "camkii"):
             t = cast(torch.Tensor, fc.post.camkii)
-            vals.append(float(t.item()))
+            vals.append(float(t.mean().item()))
     return float(np.mean(vals)) if vals else 0.0
 
 
@@ -106,16 +106,18 @@ def _reduce_elig_norm(expert: SynapticExpert) -> float:
     vals = []
     for fc in (expert.fc1, expert.fc2):
         if hasattr(fc, "post"):
-            u = cast(torch.Tensor, fc.post.U)
-            v = cast(torch.Tensor, fc.post.V)
-            h = cast(torch.Tensor, fc.post.H_fast)
-            vals.append(
-                float(
-                    u.norm().item()
-                    + v.norm().item()
-                    + h.norm().item()
-                )
-            )
+            post = fc.post
+            parts = []
+            if hasattr(post, "U"):
+                parts.append(cast(torch.Tensor, post.U).norm())
+            if hasattr(post, "V"):
+                parts.append(cast(torch.Tensor, post.V).norm())
+            if hasattr(post, "fast"):
+                parts.append(cast(torch.Tensor, post.fast).norm())
+            if hasattr(post, "slow"):
+                parts.append(cast(torch.Tensor, post.slow).norm())
+            if parts:
+                vals.append(float(sum(p.item() for p in parts)))
     return float(np.mean(vals)) if vals else 0.0
 
 
@@ -308,6 +310,7 @@ class NeuroVizConfig:
     save_pngs: bool = True
     write_tensorboard: bool = True
     write_interactive_html: bool = True
+    dead_health_threshold: float = 0.02
 
 
 class NeuroVizManager:
@@ -322,6 +325,10 @@ class NeuroVizManager:
         self.tb = SummaryWriter(cfg.log_dir) if cfg.write_tensorboard else None
         self.layers: List[Tuple[str, SynapticMoE]] = []  # (name, module)
         self.lineage = LineageBook(os.path.join(cfg.log_dir, "lineage"))
+        self._vitals_path = os.path.join(cfg.log_dir, "vitals.csv")
+        self._vitals_header_written = (
+            os.path.exists(self._vitals_path) and os.path.getsize(self._vitals_path) > 0
+        )
         self._last_tb = -(10**12)
         self._last_img = -(10**12)
         self._last_html = -(10**12)
@@ -383,6 +390,56 @@ class NeuroVizManager:
         if self.tb is not None:
             self.tb.close()
 
+    def _log_vitals(
+        self, model: nn.Module, step: int, loss: Optional[torch.Tensor]
+    ) -> None:
+        del model  # reserved for future use
+        fieldnames = [
+            "step",
+            "loss",
+            "energy_mean",
+            "health_mean",
+            "utilization_mean",
+            "dead_expert_frac",
+        ]
+        row: Dict[str, object] = {
+            "step": step,
+            "loss": float(loss.item()) if loss is not None else "",
+            "energy_mean": "",
+            "health_mean": "",
+            "utilization_mean": "",
+            "dead_expert_frac": "",
+        }
+
+        if self.layers:
+            energy_means = []
+            health_means = []
+            utilization_means = []
+            dead_fracs = []
+            for _, moe in self.layers:
+                m = self._layer_metrics(moe)
+                energy_means.append(float(np.mean(m["energy"])))
+                health_means.append(float(np.mean(m["health"])))
+                utilization_means.append(float(np.mean(m["utilization"])))
+                dead_fracs.append(
+                    float(np.mean(m["health"] <= self.cfg.dead_health_threshold))
+                )
+            row["energy_mean"] = float(np.mean(energy_means))
+            row["health_mean"] = float(np.mean(health_means))
+            row["utilization_mean"] = float(np.mean(utilization_means))
+            row["dead_expert_frac"] = float(np.mean(dead_fracs))
+
+        try:
+            with open(self._vitals_path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                if not self._vitals_header_written:
+                    writer.writeheader()
+                    self._vitals_header_written = True
+                writer.writerow(row)
+        except Exception:
+            # Never let CSV logging crash training.
+            return
+
     @torch.no_grad()
     def _layer_metrics(self, moe: SynapticMoE) -> Dict[str, np.ndarray]:
         emb = _to_np(cast(torch.Tensor, moe.router_embeddings))  # (E, D)
@@ -392,11 +449,11 @@ class NeuroVizManager:
         # fatigue tracks EMA of usage. So it IS the utilization metric.
         utilization = np.clip(fatigue, 0.0, 1.0)
         
-        # availability is the inverse of fatigue
+        # availability is the inverse of utilization
         availability = 1.0 - utilization
         
-        # health = energy * availability
-        health = energy * availability
+        # health = utilization * energy
+        health = energy * utilization
 
         # expert-specific reductions
         mgate, camkii, elig = [], [], []
@@ -414,8 +471,11 @@ class NeuroVizManager:
         qprox = []
         for e in moe.experts:
             e = cast(SynapticExpert, e)
-            s = float(e.fc2.w_slow.norm().item() + e.fc2.w_fast.norm().item())
-            qprox.append(s)
+            slow_norm = float(e.fc2.w_slow.norm().item())
+            fast_norm = (
+                float(e.fc2.w_fast.norm().item()) if e.fc2.w_fast is not None else 0.0
+            )
+            qprox.append(slow_norm + fast_norm)
         qprox_arr = np.asarray(qprox, dtype=np.float32)
 
         return dict(
@@ -479,6 +539,8 @@ class NeuroVizManager:
         self.tb.add_scalar(f"{name}/util_mean", float(np.mean(m["utilization"])), step)
         self.tb.add_scalar(f"{name}/energy_mean", float(np.mean(m["energy"])), step)
         self.tb.add_scalar(f"{name}/health_mean", float(np.mean(m["health"])), step)
+        dead_frac = float(np.mean(m["health"] <= self.cfg.dead_health_threshold))
+        self.tb.add_scalar(f"{name}/dead_expert_frac", dead_frac, step)
         self.tb.add_scalar(f"{name}/mgate_mean", float(np.mean(m["mgate"])), step)
         self.tb.add_scalar(f"{name}/camkii_mean", float(np.mean(m["camkii"])), step)
 
@@ -717,7 +779,7 @@ class NeuroVizManager:
         plt.close(fig)
 
     def _plot_hebbian_memory(self, name: str, moe: SynapticMoE, step: int, outdir: str):
-        # Visualize H_fast of the most active expert
+        # Visualize a low-rank Hebbian trace (u_buf @ v_buf) of an expert
         # Find most active expert from last_ctx
         if not hasattr(moe, "last_ctx") or not moe.last_ctx:
             return
@@ -726,14 +788,15 @@ class NeuroVizManager:
         e_idx = 0
         expert = cast(SynapticExpert, moe.experts[e_idx])
         
-        # H_fast is (d_in, d_out). It might be large.
-        # We'll take a slice.
-        if not hasattr(expert.fc1.post, "H_fast"):
+        # u_buf @ v_buf gives a low-rank trace (d_in, d_out). We'll take a slice.
+        if not hasattr(expert.fc1, "u_buf") or not hasattr(expert.fc1, "v_buf"):
             return
-            
-        H = cast(torch.Tensor, expert.fc1.post.H_fast).detach().float().cpu().numpy()
-        # Slice 50x50
-        H_sub = H[:50, :50]
+        if expert.fc1.u_buf is None or expert.fc1.v_buf is None:
+            return
+
+        u_sub = expert.fc1.u_buf[:50].detach().float().cpu()
+        v_sub = expert.fc1.v_buf[:, :50].detach().float().cpu()
+        H_sub = (u_sub @ v_sub).numpy()
         
         # Save data
         self._save_json({"heatmap": H_sub}, os.path.join(outdir, f"{name}_hebbian_{step:09d}.json"))
@@ -804,12 +867,16 @@ class NeuroVizManager:
             e = cast(SynapticExpert, e)
             # L2 norm of weights
             s = e.fc1.w_slow.norm().item() + e.fc2.w_slow.norm().item()
-            f = e.fc1.w_fast.norm().item() + e.fc2.w_fast.norm().item()
+            f = 0.0
+            if e.fc1.w_fast is not None:
+                f += e.fc1.w_fast.norm().item()
+            if e.fc2.w_fast is not None:
+                f += e.fc2.w_fast.norm().item()
             # Add Hebbian trace norm if available
-            if hasattr(e.fc1.post, "H_fast"):
-                f += cast(torch.Tensor, e.fc1.post.H_fast).norm().item()
-            if hasattr(e.fc2.post, "H_fast"):
-                f += cast(torch.Tensor, e.fc2.post.H_fast).norm().item()
+            if getattr(e.fc1, "u_buf", None) is not None and getattr(e.fc1, "v_buf", None) is not None:
+                f += e.fc1.u_buf.norm().item() + e.fc1.v_buf.norm().item()
+            if getattr(e.fc2, "u_buf", None) is not None and getattr(e.fc2, "v_buf", None) is not None:
+                f += e.fc2.u_buf.norm().item() + e.fc2.v_buf.norm().item()
                 
             slow_norms.append(s)
             fast_norms.append(f)

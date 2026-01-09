@@ -62,7 +62,6 @@ def update_metrics_fused(indices, gates, energy, state, cfg):
 
     device = gates.device
     B, T, K = gates.shape
-    E = energy.shape[0]
     total_tokens = B * T
 
     loss_contrib = _ensure_gpu_stat(state, "loss_contrib", device)

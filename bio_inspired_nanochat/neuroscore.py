@@ -9,12 +9,15 @@
 #   4. Resilience: Stability of contribution over time.
 # -----------------------------------------------------------------------------
 
-from bio_inspired_nanochat.torch_imports import torch, nn, F, Tensor
-from typing import Dict, Any
 from dataclasses import dataclass
+from typing import Any, Dict
+
+from bio_inspired_nanochat.common import decouple_config
+from bio_inspired_nanochat.torch_imports import F, Tensor, nn, torch
+
 from .synaptic import SynapticMoE
 
-Tensor = torch.Tensor
+FUSED_METRICS = decouple_config("BIO_FUSED_METRICS", default=False, cast=bool)
 
 
 @dataclass
@@ -62,14 +65,6 @@ class NeuroScore:
         # Contribution ~ RoutingWeight * ExpertEnergy (Heuristic: "Active & High Energy" ~ doing work)
         # A better "v2" would be RoutingWeight * |Grad_Expert_Output|
 
-        from decouple import Config as DecoupleConfig, RepositoryEnv, AutoConfig
-        try:
-            decouple_config = DecoupleConfig(RepositoryEnv(".env"))
-        except Exception:
-            decouple_config = AutoConfig()
-            
-        fused_metrics = decouple_config("BIO_FUSED_METRICS", default=False, cast=bool)
-
         for name, module in model.named_modules():
             if isinstance(module, SynapticMoE):
                 if not hasattr(module, "last_ctx") or not module.last_ctx:
@@ -91,7 +86,7 @@ class NeuroScore:
                 energy = module.energy # (E,)
 
                 # Fused Kernel Path
-                if fused_metrics and gates.is_cuda:
+                if FUSED_METRICS and gates.is_cuda:
                     try:
                         from bio_inspired_nanochat.kernels import update_metrics_fused
 
@@ -130,13 +125,23 @@ class NeuroScore:
                 # Scatter add
                 contrib_update = torch.zeros_like(st["loss_contrib"])
                 contrib_update.index_add_(0, indices_flat.cpu(), gates_flat.float().cpu())
-                
+
                 # Normalize by batch size
                 batch_size = gates.shape[0] * gates.shape[1]
                 contrib_update /= batch_size
-                
+
+                # Routing frequency (counts per token, sums to top_k)
+                freq_update = torch.zeros_like(st["routing_freq"])
+                freq_update.index_add_(
+                    0,
+                    indices_flat.cpu(),
+                    torch.ones_like(indices_flat.cpu(), dtype=torch.float32),
+                )
+                freq_update /= batch_size
+
                 # EMA update
                 st["loss_contrib"].mul_(self.cfg.decay).add_(contrib_update * (1 - self.cfg.decay))
+                st["routing_freq"].mul_(self.cfg.decay).add_(freq_update * (1 - self.cfg.decay))
 
                 # 3. Efficiency = Contribution / (Energy + epsilon)
                 energy_cpu = module.energy.detach().float().cpu()
@@ -240,5 +245,3 @@ class NeuroScore:
             md += f"| {rank+1} | {i} | {val:.3f} | {st['specialization'][i]:.3f} | {st['loss_contrib'][i]:.3f} |\n"
             
         tb.add_text(f"{layer_name}/leaderboard", md, step)
-
-

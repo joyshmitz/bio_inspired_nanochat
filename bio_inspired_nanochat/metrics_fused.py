@@ -1,5 +1,4 @@
 import torch
-import torch.distributed as dist
 
 def accumulate_metrics_fused(moe_ctx_list, num_experts):
     """
@@ -15,15 +14,15 @@ def accumulate_metrics_fused(moe_ctx_list, num_experts):
         counts: (E,)
         prob_sums: (E,)
     """
-    device = moe_ctx_list[0]['gates'].device
-    dtype = moe_ctx_list[0]['gates'].dtype
-    
-    total_counts = torch.zeros(num_experts, device=device, dtype=dtype)
-    total_probs = torch.zeros(num_experts, device=device, dtype=dtype)
+    device = moe_ctx_list[0]["gates"].device
+    acc_dtype = torch.float32
+
+    total_counts = torch.zeros(num_experts, device=device, dtype=acc_dtype)
+    total_probs = torch.zeros(num_experts, device=device, dtype=acc_dtype)
     
     for ctx in moe_ctx_list:
-        gates = ctx['gates'] # (B, T, k)
-        indices = ctx['indices'] # (B, T, k)
+        gates = ctx["gates"]  # (B, T, k)
+        indices = ctx["indices"]  # (B, T, k)
         
         # Flatten
         gates_flat = gates.view(-1)
@@ -36,7 +35,7 @@ def accumulate_metrics_fused(moe_ctx_list, num_experts):
         # Handle out-of-bound indices (if any, though they shouldn't be)
         mask = (indices_flat >= 0) & (indices_flat < num_experts)
         valid_indices = indices_flat[mask]
-        valid_gates = gates_flat[mask]
+        valid_gates = gates_flat[mask].to(acc_dtype)
         
         # Sum probabilities
         total_probs.index_add_(0, valid_indices, valid_gates)
@@ -57,20 +56,31 @@ def async_log_metrics(logger, model, step):
         return
 
     moe_stats = []
+    num_experts_set = set()
     for name, module in model.named_modules():
         if hasattr(module, 'last_ctx') and module.last_ctx:
             moe_stats.append(module.last_ctx)
+            if hasattr(module, "num_experts"):
+                num_experts_set.add(int(module.num_experts))
             
     if not moe_stats:
         return
         
-    # Assume homogenous MOE for now
-    E = 8 # default, should extract from module
+    # Assume homogeneous MoE; fall back to inferred size if not available.
+    if len(num_experts_set) == 1:
+        E = num_experts_set.pop()
+    elif len(num_experts_set) > 1:
+        # Mixed expert counts; skip logging to avoid incorrect aggregation.
+        return
+    else:
+        # Infer from indices if modules didn't expose num_experts.
+        max_idx = max(int(ctx["indices"].max().item()) for ctx in moe_stats)
+        E = max_idx + 1
     
     counts, probs = accumulate_metrics_fused(moe_stats, E)
     
     # Sync for logging (this is the only stall, can be threaded)
-    counts_cpu = counts.cpu().numpy()
-    probs_cpu = probs.cpu().numpy()
+    counts.cpu().numpy()
+    probs.cpu().numpy()
     
     # ... Logging logic ...
