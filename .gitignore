@@ -13,3 +13,4 @@ rustbpe.pyi.bak
 .env
 .envrc
 wandb
+.research/
