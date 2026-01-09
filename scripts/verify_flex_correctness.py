@@ -1,6 +1,4 @@
-
 import torch
-import torch.nn as nn
 from bio_inspired_nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig
 from bio_inspired_nanochat.synaptic import SynapticConfig
 
@@ -22,7 +20,8 @@ def test_flex_correctness():
     syn_cfg = SynapticConfig(
         enable_presyn=True,
         enable_hebbian=True,
-        enable_metabolism=True
+        enable_metabolism=True,
+        use_flex_attention=True,
     )
     
     config = GPTSynapticConfig(
@@ -34,10 +33,9 @@ def test_flex_correctness():
         n_embd=128,
         synapses=True,
         syn_cfg=syn_cfg,
-        use_flex_attention=True
     )
     
-    print("Initializing model with use_flex_attention=True...")
+    print("Initializing model with SynapticConfig.use_flex_attention=True...")
     model = GPTSynaptic(config).to(device).to(dtype)
     model = torch.compile(model) # Flex requires compile
     
