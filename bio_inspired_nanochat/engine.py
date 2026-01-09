@@ -11,33 +11,103 @@ Notes:
 The whole thing is made as efficient as possible.
 """
 
-from bio_inspired_nanochat.torch_imports import torch, F, Tensor
+from bio_inspired_nanochat.torch_imports import torch, F
+import ast
+import operator
 import signal
-import warnings
+import inspect
 from contextlib import contextmanager
 from collections import deque
 from bio_inspired_nanochat.common import compute_init, autodetect_device_type
 from bio_inspired_nanochat.checkpoint_manager import load_model
-from contextlib import nullcontext 
+from contextlib import nullcontext
 
 # -----------------------------------------------------------------------------
 # Calculator tool helpers
 @contextmanager
 def timeout(duration, formula):
     def timeout_handler(signum, frame):
-        raise Exception(f"'{formula}': timed out after {duration} seconds")
+        raise TimeoutError(f"'{formula}': timed out after {duration} seconds")
 
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(duration)
-    yield
-    signal.alarm(0)
+    prev_handler = signal.getsignal(signal.SIGALRM)
+    try:
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(duration)
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, prev_handler)
+
+_ALLOWED_BINOPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+}
+
+_ALLOWED_UNARYOPS = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+
+
+def _safe_calc_eval_node(node):
+    if isinstance(node, ast.Expression):
+        return _safe_calc_eval_node(node.body)
+
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (int, float, str)):
+            return node.value
+        raise ValueError("Unsupported literal in calculator expression")
+
+    if isinstance(node, ast.UnaryOp):
+        op_fn = _ALLOWED_UNARYOPS.get(type(node.op))
+        if op_fn is None:
+            raise ValueError("Unsupported unary operator in calculator expression")
+        val = _safe_calc_eval_node(node.operand)
+        if not isinstance(val, (int, float)):
+            raise ValueError("Unary operators only apply to numbers")
+        return op_fn(val)
+
+    if isinstance(node, ast.BinOp):
+        op_fn = _ALLOWED_BINOPS.get(type(node.op))
+        if op_fn is None:
+            raise ValueError("Unsupported binary operator in calculator expression")
+        left = _safe_calc_eval_node(node.left)
+        right = _safe_calc_eval_node(node.right)
+        if not isinstance(left, (int, float)) or not isinstance(right, (int, float)):
+            raise ValueError("Binary operators only apply to numbers")
+        return op_fn(left, right)
+
+    if isinstance(node, ast.Call):
+        if node.keywords:
+            raise ValueError("Keyword args are not allowed in calculator calls")
+        if not isinstance(node.func, ast.Attribute) or node.func.attr != "count":
+            raise ValueError("Only str.count(...) is allowed in calculator calls")
+        obj = _safe_calc_eval_node(node.func.value)
+        if not isinstance(obj, str):
+            raise ValueError("count() is only allowed on string literals")
+        if len(node.args) != 1:
+            raise ValueError("count() requires exactly one argument")
+        needle = _safe_calc_eval_node(node.args[0])
+        if not isinstance(needle, str):
+            raise ValueError("count() argument must be a string literal")
+        return obj.count(needle)
+
+    raise ValueError(f"Unsupported syntax in calculator expression: {type(node).__name__}")
+
+
+def _safe_calc_eval(expr: str):
+    parsed = ast.parse(expr, mode="eval")
+    return _safe_calc_eval_node(parsed)
+
 
 def eval_with_timeout(formula, max_time=3):
     try:
         with timeout(max_time, formula):
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", SyntaxWarning)
-                return eval(formula, {"__builtins__": {}}, {})
+            return _safe_calc_eval(formula)
     except Exception:
         signal.alarm(0)
         # print(f"Warning: Failed to eval {formula}, exception: {e}") # it's ok ignore wrong calculator usage
@@ -45,37 +115,15 @@ def eval_with_timeout(formula, max_time=3):
 
 def use_calculator(expr):
     """
-    Evaluate a Python expression safely.
-    Supports both math expressions and string operations like .count()
+    Safe calculator evaluator for tool-usage.
+
+    Allowed:
+    - Numeric literals and arithmetic: +, -, *, /, //, %, parentheses, unary +/-.
+    - Literal string count: \"some string\".count(\"sub\") (no variables, no keywords).
     """
-    # Remove commas from numbers
-    expr = expr.replace(",", "")
-
-    # Check if it's a pure math expression (old behavior)
-    if all([x in "0123456789*+-/.() " for x in expr]):
-        if "**" in expr:  # disallow power operator
-            return None
-        return eval_with_timeout(expr)
-
-    # Check if it's a string operation we support
-    # Allow: strings (single/double quotes), .count(), letters, numbers, spaces, parens
-    allowed_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'\"()._ "
-    if not all([x in allowed_chars for x in expr]):
+    expr = expr.replace(",", "").strip()
+    if not expr:
         return None
-
-    # Disallow dangerous patterns
-    dangerous_patterns = ['__', 'import', 'exec', 'eval', 'compile', 'open', 'file',
-                         'input', 'raw_input', 'globals', 'locals', 'vars', 'dir',
-                         'getattr', 'setattr', 'delattr', 'hasattr']
-    expr_lower = expr.lower()
-    if any(pattern in expr_lower for pattern in dangerous_patterns):
-        return None
-
-    # Only allow .count() method for now (can expand later)
-    if '.count(' not in expr:
-        return None
-
-    # Evaluate with timeout
     return eval_with_timeout(expr)
 
 # -----------------------------------------------------------------------------
@@ -89,7 +137,7 @@ class KVCache:
         # Each of K/V is of shape (B, H, T, D) and we have one per layer of the Transformer.
         self.kv_shape = (num_layers, 2, batch_size, num_heads, seq_len, head_dim)
         self.kv_cache = None
-        self.presyn_state = None # Biological state (RRP, Calcium, etc.)
+        self.presyn_state = None # Biological state (per-layer if synaptic model)
         self.pos = 0 # current position in time in the cache
 
     def reset(self):
@@ -123,35 +171,54 @@ class KVCache:
         dtype, device = other.kv_cache.dtype, other.kv_cache.device
         self.kv_cache = torch.empty(self.kv_shape, dtype=dtype, device=device)
         # 3) copy the data over
-        self.kv_cache[:, :, :, :, :other.pos, :] = other.kv_cache
+        self.kv_cache[:, :, :, :, : other.pos, :] = other.kv_cache[
+            :, :, :, :, : other.pos, :
+        ]
         # 4) update the pos
         self.pos = other.pos
         # 5) copy presyn_state if exists
         if other.presyn_state is not None:
-            self.presyn_state = {}
             target_B = self.kv_shape[2]
             src_B = other.kv_shape[2] # Assuming other.kv_shape is correct
-            
-            for k, v in other.presyn_state.items():
-                if isinstance(v, list):
-                     # delay queue is a list of tensors
-                     self.presyn_state[k] = []
-                     for t in v:
-                         if isinstance(t, torch.Tensor):
-                             if src_B == 1 and target_B > 1:
-                                 # Expand batch dim
-                                 self.presyn_state[k].append(t.expand(target_B, *t.shape[1:]).clone())
-                             else:
-                                 self.presyn_state[k].append(t.clone())
-                         else:
-                             self.presyn_state[k].append(t)
-                elif isinstance(v, torch.Tensor):
-                     if src_B == 1 and target_B > 1:
-                         self.presyn_state[k] = v.expand(target_B, *v.shape[1:]).clone()
-                     else:
-                         self.presyn_state[k] = v.clone()
-                else:
-                    self.presyn_state[k] = v
+
+            def clone_presyn_state(state_dict):
+                if state_dict is None:
+                    return None
+                new_state = {}
+                for key, value in state_dict.items():
+                    if isinstance(value, list):
+                        # delay queue is a list of tensors
+                        new_queue = []
+                        for item in value:
+                            if isinstance(item, torch.Tensor):
+                                if src_B == 1 and target_B > 1:
+                                    # Expand batch dim
+                                    expanded = item.expand(
+                                        target_B, *item.shape[1:]
+                                    ).clone()
+                                    new_queue.append(expanded)
+                                else:
+                                    new_queue.append(item.clone())
+                            else:
+                                new_queue.append(item)
+                        new_state[key] = new_queue
+                    elif isinstance(value, torch.Tensor):
+                        if src_B == 1 and target_B > 1:
+                            new_state[key] = value.expand(
+                                target_B, *value.shape[1:]
+                            ).clone()
+                        else:
+                            new_state[key] = value.clone()
+                    else:
+                        new_state[key] = value
+                return new_state
+
+            if isinstance(other.presyn_state, list):
+                self.presyn_state = [clone_presyn_state(st) for st in other.presyn_state]
+            elif isinstance(other.presyn_state, dict):
+                self.presyn_state = clone_presyn_state(other.presyn_state)
+            else:
+                self.presyn_state = None
 
     def insert_kv(self, layer_idx, k, v):
         # Lazy initialize the cache here because we need to know the dtype/device
@@ -216,6 +283,17 @@ class Engine:
     def __init__(self, model, tokenizer):
         self.model = model
         self.tokenizer = tokenizer # needed for tool use
+        try:
+            self._supports_train_mode = (
+                "train_mode" in inspect.signature(self.model.forward).parameters
+            )
+        except (TypeError, ValueError):
+            self._supports_train_mode = False
+
+    def _forward(self, ids, kv_cache):
+        if self._supports_train_mode:
+            return self.model.forward(ids, kv_cache=kv_cache, train_mode=False)
+        return self.model.forward(ids, kv_cache=kv_cache)
 
     @torch.inference_mode()
     def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42, yield_metrics=False):
@@ -244,7 +322,7 @@ class Engine:
             **kv_model_kwargs,
         )
         ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        result = self.model.forward(ids, kv_cache=kv_cache_prefill)
+        result = self._forward(ids, kv_cache_prefill)
         # Handle both GPT (returns logits) and GPTSynaptic (returns (logits, None))
         if isinstance(result, tuple):
             logits, _ = result
@@ -281,12 +359,17 @@ class Engine:
             # Get sampled tokens - either from prefill or from forward pass
             if first_iteration:
                 # Use the tokens we already sampled from prefill
-                sampled_tokens = [sampled_tokens[0]] * num_samples  # Broadcast first token to all rows
-                # TODO: we should sample a token for each row instead of broadcasting
+                if num_samples == 1:
+                    sampled_tokens = [sampled_tokens[0]]
+                else:
+                    # Sample independently per row from the same prefill logits
+                    logits_rep = logits.expand(num_samples, -1).contiguous()
+                    next_ids = sample_next_token(logits_rep, rng, temperature, top_k)
+                    sampled_tokens = next_ids[:, 0].tolist()
                 first_iteration = False
             else:
                 # Forward the model and get the next token for each row
-                result = self.model.forward(ids, kv_cache=kv_cache_decode)  # (B, T, vocab_size) or (logits, None)
+                result = self._forward(ids, kv_cache_decode)  # (B, T, vocab_size) or (logits, None)
                 # Handle both GPT (returns logits) and GPTSynaptic (returns (logits, None))
                 if isinstance(result, tuple):
                     logits, _ = result
@@ -359,16 +442,30 @@ class Engine:
                 metrics['moe'] = moe_stats
                 
                 # 2. Presynaptic Stats (RRP, C)
-                if kv_cache_decode.presyn_state:
+                presyn_state = kv_cache_decode.presyn_state
+                if isinstance(presyn_state, list):
+                    presyn_state = presyn_state[-1] if presyn_state else None
+                if presyn_state:
                     presyn_stats = {}
-                    for k in ['c', 'rrp', 'sn', 'cl', 'en']:
-                        if k in kv_cache_decode.presyn_state:
-                            t = kv_cache_decode.presyn_state[k] # (B, H, T)
-                            # Get last step
+                    # Map friendly metric keys to presynaptic state keys
+                    state_key_map = {
+                        "c": "C",
+                        "rrp": "RRP",
+                        "sn": "PR",
+                        "cl": "CL",
+                        "en": "E",
+                        "amp": "AMP",
+                        "buf": "BUF",
+                    }
+                    for out_key, state_key in state_key_map.items():
+                        if state_key in presyn_state:
+                            t = presyn_state[state_key]  # (B, H, T)
                             if t.shape[-1] > 0:
-                                last_val = t[..., -1] # (B, H)
-                                presyn_stats[k] = last_val.float().cpu().numpy().tolist()
-                    metrics['presyn'] = presyn_stats
+                                last_val = t[..., -1]  # (B, H)
+                                presyn_stats[out_key] = (
+                                    last_val.float().cpu().numpy().tolist()
+                                )
+                    metrics["presyn"] = presyn_stats
 
                 # 3. Postsynaptic Memory Stats (CaMKII - Long Term Potentiation)
                 # This represents "how much the model is learning/writing to memory" at this step
@@ -412,6 +509,10 @@ class Engine:
         Returns a list of token sequences (list of lists of ints).
         Terminal tokens (assistant_end, bos) are not included in the results.
         """
+        # Strip yield_metrics from kwargs since generate_batch doesn't use metrics
+        # and generate() yields 3 values when yield_metrics=True which would cause
+        # unpacking to fail below.
+        kwargs.pop("yield_metrics", None)
         assistant_end = self.tokenizer.encode_special("<|assistant_end|>")
         bos = self.tokenizer.get_bos_token_id()
         results = [tokens.copy() for _ in range(num_samples)]
@@ -437,9 +538,9 @@ if __name__ == "__main__":
     is equivalent to the faster Engine.generate function here.
     """
     import time
-    # init compute
-    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init()
     device_type = autodetect_device_type()
+    # init compute
+    ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
     autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
 
     # load the model and tokenizer
@@ -451,7 +552,8 @@ if __name__ == "__main__":
     prompt_tokens = tokenizer.encode("The chemical formula of water is", prepend=bos_token_id)
     # generate the reference sequence using the model.generate() function
     generated_tokens = []
-    torch.cuda.synchronize()
+    if device_type == "cuda":
+        torch.cuda.synchronize()
     t0 = time.time()
     stream = model.generate(prompt_tokens, **kwargs)
     with autocast_ctx:
@@ -460,7 +562,8 @@ if __name__ == "__main__":
             chunk = tokenizer.decode([token])
             print(chunk, end="", flush=True)
     print()
-    torch.cuda.synchronize()
+    if device_type == "cuda":
+        torch.cuda.synchronize()
     t1 = time.time()
     print(f"Reference time: {t1 - t0:.2f}s")
     reference_ids = generated_tokens
@@ -468,7 +571,8 @@ if __name__ == "__main__":
     generated_tokens = []
     engine = Engine(model, tokenizer)
     stream = engine.generate(prompt_tokens, num_samples=1, **kwargs) # note: runs in fp32
-    torch.cuda.synchronize()
+    if device_type == "cuda":
+        torch.cuda.synchronize()
     t0 = time.time()
     with autocast_ctx:
         for token_column, token_masks in stream:
@@ -477,7 +581,8 @@ if __name__ == "__main__":
             chunk = tokenizer.decode([token])
             print(chunk, end="", flush=True)
     print()
-    torch.cuda.synchronize()
+    if device_type == "cuda":
+        torch.cuda.synchronize()
     t1 = time.time()
     print(f"Engine time: {t1 - t0:.2f}s")
     # compare the two sequences

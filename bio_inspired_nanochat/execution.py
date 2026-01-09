@@ -30,7 +30,7 @@ import platform
 import signal
 import tempfile
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional, cast
 
 # -----------------------------------------------------------------------------
 
@@ -131,7 +131,7 @@ def chdir(root):
         os.chdir(cwd)
 
 
-def reliability_guard(maximum_memory_bytes: Optional[int] = None):
+def reliability_guard(maximum_memory_bytes: Optional[int] = 256 * 1024 * 1024):
     """
     This disables various destructive functions and prevents the generated code
     from interfering with the test (e.g. fork bomb, killing other processes,
@@ -144,71 +144,87 @@ def reliability_guard(maximum_memory_bytes: Optional[int] = None):
     with caution.
     """
 
-    if platform.uname().system != "Darwin":
-        # These resource limit calls seem to fail on macOS (Darwin), skip?
-        import resource
-        resource.setrlimit(resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes))
-        resource.setrlimit(resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes))
-        resource.setrlimit(resource.RLIMIT_STACK, (maximum_memory_bytes, maximum_memory_bytes))
+    if maximum_memory_bytes is not None and platform.uname().system != "Darwin":
+        # These resource limit calls seem to fail on macOS (Darwin).
+        # Also note: `resource` is not available on Windows.
+        try:
+            import resource
+        except ImportError:
+            pass
+        else:
+            resource.setrlimit(
+                resource.RLIMIT_AS,
+                (maximum_memory_bytes, maximum_memory_bytes),
+            )
+            resource.setrlimit(
+                resource.RLIMIT_DATA,
+                (maximum_memory_bytes, maximum_memory_bytes),
+            )
+            resource.setrlimit(
+                resource.RLIMIT_STACK,
+                (maximum_memory_bytes, maximum_memory_bytes),
+            )
 
     faulthandler.disable()
 
-    import builtins
+    import builtins as _builtins
+    builtins_any = cast(Any, _builtins)
+    builtins_any.exit = None
+    builtins_any.quit = None
+    builtins_any.help = None
 
-    builtins.exit = None
-    builtins.quit = None
+    import os as _os
+    os_any = cast(Any, _os)
 
-    import os
+    os_any.environ["OMP_NUM_THREADS"] = "1"
 
-    os.environ["OMP_NUM_THREADS"] = "1"
+    os_any.kill = None
+    os_any.system = None
+    os_any.putenv = None
+    os_any.remove = None
+    os_any.removedirs = None
+    os_any.rmdir = None
+    os_any.fchdir = None
+    os_any.setuid = None
+    os_any.fork = None
+    os_any.forkpty = None
+    os_any.killpg = None
+    os_any.rename = None
+    os_any.renames = None
+    os_any.truncate = None
+    os_any.replace = None
+    os_any.unlink = None
+    os_any.fchmod = None
+    os_any.fchown = None
+    os_any.chmod = None
+    os_any.chown = None
+    os_any.chroot = None
+    os_any.lchflags = None
+    os_any.lchmod = None
+    os_any.lchown = None
+    os_any.getcwd = None
+    os_any.chdir = None
 
-    os.kill = None
-    os.system = None
-    os.putenv = None
-    os.remove = None
-    os.removedirs = None
-    os.rmdir = None
-    os.fchdir = None
-    os.setuid = None
-    os.fork = None
-    os.forkpty = None
-    os.killpg = None
-    os.rename = None
-    os.renames = None
-    os.truncate = None
-    os.replace = None
-    os.unlink = None
-    os.fchmod = None
-    os.fchown = None
-    os.chmod = None
-    os.chown = None
-    os.chroot = None
-    os.fchdir = None
-    os.lchflags = None
-    os.lchmod = None
-    os.lchown = None
-    os.getcwd = None
-    os.chdir = None
+    import shutil as _shutil
+    shutil_any = cast(Any, _shutil)
 
-    import shutil
+    shutil_any.rmtree = None
+    shutil_any.move = None
+    shutil_any.chown = None
 
-    shutil.rmtree = None
-    shutil.move = None
-    shutil.chown = None
+    import subprocess as _subprocess
+    subprocess_any = cast(Any, _subprocess)
 
-    import subprocess
+    subprocess_any.Popen = None
 
-    subprocess.Popen = None  # type: ignore
+    import sys as _sys
+    modules_any = cast(Any, _sys.modules)
 
-    __builtins__["help"] = None
-
-    import sys
-
-    sys.modules["ipdb"] = None
-    sys.modules["joblib"] = None
-    sys.modules["resource"] = None
-    sys.modules["psutil"] = None
-    sys.modules["tkinter"] = None
+    modules_any["ipdb"] = None
+    modules_any["joblib"] = None
+    modules_any["resource"] = None
+    modules_any["psutil"] = None
+    modules_any["tkinter"] = None
 
 
 def _unsafe_execute(code: str, timeout: float, maximum_memory_bytes: Optional[int], result_dict):
@@ -319,6 +335,7 @@ def execute_code(
 
     if p.is_alive():
         p.kill()
+        p.join()
         return ExecutionResult(
             success=False,
             stdout="",
@@ -346,4 +363,3 @@ def execute_code(
         timeout=result_dict["timeout"],
         memory_exceeded=result_dict["memory_exceeded"],
     )
-

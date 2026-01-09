@@ -1,11 +1,12 @@
 """
 Utilities for saving and loading model/optim/state checkpoints.
 """
-import os
-import re
 import glob
 import json
 import logging
+import os
+import re
+
 from bio_inspired_nanochat.torch_imports import torch
 
 from bio_inspired_nanochat.common import get_base_dir
@@ -13,16 +14,11 @@ from bio_inspired_nanochat.gpt import GPT, GPTConfig
 from bio_inspired_nanochat.tokenizer import get_tokenizer
 from bio_inspired_nanochat.common import setup_default_logging
 
-# Try to import GPTSynaptic for synaptic model support
-try:
-    from bio_inspired_nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig
-except Exception:
-    GPTSynaptic = None
-    GPTSynapticConfig = None
-
 # Set up logging
 setup_default_logging()
 logger = logging.getLogger(__name__)
+
+
 def log0(message):
     if int(os.environ.get('RANK', 0)) == 0:
         logger.info(message)
@@ -93,8 +89,16 @@ def build_model(checkpoint_dir, step, device, phase):
     
     # Check if this is a synaptic model
     if meta_data.get("synapses", False):
-        assert GPTSynaptic is not None, "gpt_synaptic not found but synapses=True in metadata"
-        from bio_inspired_nanochat.synaptic import SynapticConfig
+        try:
+            from bio_inspired_nanochat.gpt_synaptic import (
+                GPTSynaptic,
+                GPTSynapticConfig,
+            )
+            from bio_inspired_nanochat.synaptic import SynapticConfig
+        except Exception as e:
+            raise ImportError(
+                "Synaptic checkpoint requires synaptic modules, but they failed to import."
+            ) from e
         syn_cfg = SynapticConfig()  # Use defaults; could load from meta_data if saved
         model_config = GPTSynapticConfig(
             sequence_len=model_config_kwargs["sequence_len"],
@@ -103,7 +107,17 @@ def build_model(checkpoint_dir, step, device, phase):
             n_head=model_config_kwargs["n_head"],
             n_kv_head=model_config_kwargs.get("n_kv_head", model_config_kwargs["n_head"]),
             n_embd=model_config_kwargs["n_embd"],
+            synapses=True,
             syn_cfg=syn_cfg,
+            dropout=model_config_kwargs.get("dropout", 0.0),
+            use_moe=model_config_kwargs.get("use_moe", False),
+            num_experts=model_config_kwargs.get("num_experts", 8),
+            moe_top_k=model_config_kwargs.get("moe_top_k", 2),
+            moe_hidden_mult=model_config_kwargs.get("moe_hidden_mult", 4),
+            moe_balance_loss=model_config_kwargs.get("moe_balance_loss", 0.01),
+            structural_every=model_config_kwargs.get("structural_every", 0),
+            init_type=model_config_kwargs.get("init_type", "baseline"),
+            init_seed=int(model_config_kwargs.get("init_seed", 42)),
         )
         with torch.device("meta"):
             model = GPTSynaptic(model_config)
