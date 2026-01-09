@@ -3,7 +3,7 @@ name = "bio-inspired-nanochat"
 version = "0.1.0"
 description = "the minimal full-stack ChatGPT clone"
 readme = "README.md"
-requires-python = ">=3.13,<3.15"
+requires-python = ">=3.14,<3.15"
 dependencies = [
     "datasets>=4.0.0",
     "fastapi>=0.117.1",
@@ -23,7 +23,7 @@ dependencies = [
     "tensorboard>=2.16.0",
     "tiktoken>=0.11.0",
     "tokenizers>=0.22.0",
-    "torch==2.5.1",
+    "torch==2.9.1",
     "triton>=3.0.0",
     "transformers>=4.40.0",
     "uvicorn>=0.36.0",
@@ -31,10 +31,6 @@ dependencies = [
     "ruff>=0.1.0",
     "cma>=3.2.2",
     "ty>=0.0.1a27",
-    "scikit-learn",
-    "plotly",
-    "umap-learn",
-    "streamlit>=1.32.0",
 ]
 
 [build-system]
@@ -66,8 +62,8 @@ python_functions = ["test_*"]
 [tool.uv.sources]
 torch = [  
     { index = "pytorch-cpu", extra = "cpu" },  
-    { index = "pytorch-cu124", extra = "gpu" },  
-]
+    { index = "pytorch-cu128", extra = "gpu" },  
+]  
 
 [[tool.uv.index]]  
 name = "pytorch-cpu"  
@@ -75,21 +71,22 @@ url = "https://download.pytorch.org/whl/cpu"
 explicit = true  
 
 [[tool.uv.index]]  
-name = "pytorch-cu124"  
-url = "https://download.pytorch.org/whl/cu124"  
+name = "pytorch-cu128"  
+url = "https://download.pytorch.org/whl/cu128"  
 explicit = true
 
 [project.optional-dependencies]  
 cpu = [  
-    "torch==2.5.1",  
+    "torch==2.9.1",  
 ]  
 gpu = [  
-    "torch==2.5.1",  
-]
+    "torch==2.9.1",  
+]  
 viz = [
     "plotly>=5.18.0",
     "scikit-learn>=1.4.0",
     "umap-learn>=0.5.5",
+    "streamlit>=1.32.0",
 ]  
   
 [tool.uv]  

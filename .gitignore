@@ -2,12 +2,14 @@
 __pycache__/
 *.pyc
 rustbpe/target/
+rust_src/target/
 dev-ignore/
 report.md
 eval_bundle/
 runs/
 target/*
 run_log*.txt
+rustbpe.pyi.bak
 .env
 .envrc
 wandb
