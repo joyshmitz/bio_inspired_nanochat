@@ -26,6 +26,12 @@ import time
 import rustbpe
 import tiktoken
 import pytest
+from tokenizers import Tokenizer as HFTokenizer
+from tokenizers import decoders, pre_tokenizers, Regex
+from tokenizers.models import BPE
+from tokenizers.trainers import BpeTrainer
+
+rustbpe = cast(Any, rustbpe)
 
 GPT4_SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
 
@@ -108,7 +114,7 @@ class RegexTokenizer:
                 # passing in stats will update it in place, adding up counts
                 get_stats(chunk_ids, stats)
             # find the pair with the highest count
-            pair = max(stats, key=stats.get)
+            pair = max(stats, key=stats.__getitem__)
             # check if the merge is ambiguous - i.e. the max value is not unique
             pair_count = stats[pair]
             pairs_with_max_count = [pair for pair, count in stats.items() if count == pair_count]
@@ -248,7 +254,7 @@ class FastRegexTokenizer:
                 break
 
             # find the pair with the highest count
-            pair = max(stats, key=stats.get)
+            pair = max(stats, key=stats.__getitem__)
             # mint a new token: assign it the next available id
             idx = 256 + i
 
@@ -376,10 +382,6 @@ class FastRegexTokenizer:
 
 # -----------------------------------------------------------------------------
 # HuggingFace tokenizer
-from tokenizers import Tokenizer as HFTokenizer
-from tokenizers import pre_tokenizers, decoders, Regex
-from tokenizers.models import BPE
-from tokenizers.trainers import BpeTrainer
 
 class HuggingFaceTokenizer:
     """Light wrapper around HuggingFace Tokenizer for some utilities"""
@@ -535,7 +537,7 @@ def test_correctness(enwik8_small):
 
     # Finally use our own Rust implementation
     print("\nTraining rustbpe...")
-    rustbpe_tokenizer = rustbpe.Tokenizer()
+    rustbpe_tokenizer = cast(Any, rustbpe).Tokenizer()
     _, rustbpe_train_time = time_function(rustbpe_tokenizer.train_from_iterator, [text], vocab_size)
     rustbpe_ids, rustbpe_encode_time = time_function(rustbpe_tokenizer.encode, encode_text)
     print(f"RustBPE train time: {rustbpe_train_time:.4f}s")
@@ -580,7 +582,7 @@ def test_training_performance(enwik8_large):
 
     # Train rustbpe
     print("\nTraining rustbpe...")
-    rustbpe_tokenizer = rustbpe.Tokenizer()
+    rustbpe_tokenizer = cast(Any, rustbpe).Tokenizer()
     _, rustbpe_train_time = time_function(rustbpe_tokenizer.train_from_iterator, [text], vocab_size)
     print(f"RustBPE train time: {rustbpe_train_time:.4f}s")
     assert rustbpe_train_time > 0, "Training should take some time"

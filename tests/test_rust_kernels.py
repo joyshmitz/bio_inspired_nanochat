@@ -1,8 +1,9 @@
 import torch
 import numpy as np
 import pytest
-from bio_inspired_nanochat.synaptic import SynapticConfig, build_presyn_state
-import torch.nn.functional as F
+from bio_inspired_nanochat.engine import KVCache
+from bio_inspired_nanochat.gpt_synaptic import GPTSynaptic, GPTSynapticConfig
+from bio_inspired_nanochat.synaptic import SynapticConfig, SynapticPresyn
 
 # Try to import rustbpe_native, skip if not available
 try:
@@ -137,6 +138,7 @@ def presyn_step_python_ref(q, k, logits, state, cfg):
 
 @pytest.mark.skipif(rustbpe is None, reason="rustbpe not installed")
 def test_presyn_step_cpu_parity():
+    assert rustbpe is not None
     B, H, T, D = 2, 4, 32, 16
     # Use config compatible with Rust implementation
     cfg = SynapticConfig(native_presyn=True)
@@ -179,13 +181,15 @@ def test_presyn_step_cpu_parity():
     
     print("Comparing state...")
     for k in state:
-        if k == "CL": continue # CL is constant
+        if k == "CL":
+            continue  # CL is constant
         diff = torch.abs(torch.from_numpy(state_new_rust[k]) - state_new_py[k])
         print(f"State {k} max diff: {diff.max().item()}")
         assert torch.allclose(torch.from_numpy(state_new_rust[k]), state_new_py[k], atol=1e-4, rtol=1e-4)
 
 @pytest.mark.skipif(rustbpe is None, reason="rustbpe not installed")
 def test_moe_stats_cpu_parity():
+    assert rustbpe is not None
     B, T, k = 2, 128, 2
     E = 8
     
@@ -216,6 +220,7 @@ def test_moe_stats_cpu_parity():
 
 @pytest.mark.skipif(rustbpe is None, reason="rustbpe not installed")
 def test_metabolism_cpu_parity():
+    assert rustbpe is not None
     E = 8
     fatigue = torch.rand(E)
     energy = torch.rand(E)
@@ -249,3 +254,302 @@ if __name__ == "__main__":
         print("All tests passed!")
     else:
         print("rustbpe not installed, skipping tests")
+
+
+def test_presyn_mix_prob_respects_clamp():
+    cfg = SynapticConfig()
+    pre = SynapticPresyn(d_head=16, cfg=cfg)
+    c = torch.tensor([0.9])
+    sn = torch.tensor([1.0])
+    p_low = pre._mix_prob(c, clamp=torch.tensor([0.0]), sn=sn)
+    p_high = pre._mix_prob(c, clamp=torch.tensor([1.0]), sn=sn)
+    assert torch.all(p_low > p_high)
+
+
+def test_stochastic_binomial_counts_matches_moments():
+    from bio_inspired_nanochat.synaptic import _sample_binomial_counts
+
+    torch.manual_seed(0)
+
+    N = 50_000
+    p = torch.full((N,), 0.3, dtype=torch.float32)
+    n = torch.full((N,), 5.0, dtype=torch.float32)
+
+    samples = _sample_binomial_counts(
+        p,
+        n,
+        max_count=8,
+        tau=1.0,
+        mode="gumbel_sigmoid_ste",
+    )
+
+    mean_emp = float(samples.mean())
+    var_emp = float(samples.var(unbiased=False))
+    mean_true = float(5.0 * 0.3)
+    var_true = float(5.0 * 0.3 * (1.0 - 0.3))
+
+    assert abs(mean_emp - mean_true) < 0.03
+    assert abs(var_emp - var_true) < 0.05
+
+
+def test_presyn_release_is_deterministic_when_stochastic_train_frac_is_zero():
+    from bio_inspired_nanochat.synaptic import build_presyn_state
+
+    torch.manual_seed(0)
+
+    cfg = SynapticConfig()
+    cfg.stochastic_train_frac = 0.0
+
+    pre_train = SynapticPresyn(d_head=16, cfg=cfg)
+    pre_eval = SynapticPresyn(d_head=16, cfg=cfg)
+
+    B, H, Tk, Tq, K = 1, 2, 6, 3, 4
+    drive = torch.randn(B, H, Tq, K)
+    idx = torch.randint(0, Tk, (B, H, Tq, K))
+
+    state_train = build_presyn_state(B, Tk, H, drive.device, drive.dtype, cfg)
+    state_eval = build_presyn_state(B, Tk, H, drive.device, drive.dtype, cfg)
+
+    e_train = pre_train.release(state_train, drive, idx, train=True)
+    e_eval = pre_eval.release(state_eval, drive, idx, train=False)
+
+    torch.testing.assert_close(e_train, e_eval, rtol=1e-6, atol=1e-6)
+    for key in ["C", "BUF", "RRP", "RES", "PR", "CL", "E", "AMP"]:
+        torch.testing.assert_close(state_train[key], state_eval[key], rtol=1e-6, atol=1e-6)
+    for d_train, d_eval in zip(state_train["DELAY"], state_eval["DELAY"], strict=True):
+        torch.testing.assert_close(d_train, d_eval, rtol=1e-6, atol=1e-6)
+
+
+def test_gpt_synaptic_kv_cache_matches_full_forward():
+    torch.manual_seed(0)
+    syn_cfg = SynapticConfig(enable_presyn=False, lambda_loge=0.0, barrier_strength=0.0)
+    cfg = GPTSynapticConfig(
+        sequence_len=32,
+        vocab_size=97,
+        n_layer=2,
+        n_head=2,
+        n_kv_head=1,
+        n_embd=16,
+        dropout=0.0,
+        synapses=True,
+        syn_cfg=syn_cfg,
+    )
+    model = GPTSynaptic(cfg).eval()
+
+    B, T = 1, 12
+    idx = torch.randint(0, cfg.vocab_size, (B, T))
+
+    logits_full, _loss = model(idx, kv_cache=None, train_mode=False)
+
+    head_dim = cfg.n_embd // cfg.n_head
+    kv_cache = KVCache(
+        batch_size=B,
+        num_heads=cfg.n_kv_head,
+        seq_len=T,
+        head_dim=head_dim,
+        num_layers=cfg.n_layer,
+    )
+
+    step_logits = []
+    for t in range(T):
+        logits_t, _ = model(idx[:, t : t + 1], kv_cache=kv_cache, train_mode=False)
+        step_logits.append(logits_t[:, -1, :])
+    logits_kv = torch.stack(step_logits, dim=1)
+
+    torch.testing.assert_close(logits_kv, logits_full, rtol=1e-4, atol=1e-6)
+
+
+def test_gpt_synaptic_loss_ignores_minus_one_targets():
+    torch.manual_seed(0)
+    syn_cfg = SynapticConfig(enable_presyn=False, lambda_loge=0.0, barrier_strength=0.0)
+    cfg = GPTSynapticConfig(
+        sequence_len=32,
+        vocab_size=97,
+        n_layer=2,
+        n_head=2,
+        n_kv_head=1,
+        n_embd=16,
+        dropout=0.0,
+        synapses=True,
+        syn_cfg=syn_cfg,
+    )
+    model = GPTSynaptic(cfg).eval()
+
+    B, T = 2, 12
+    idx = torch.randint(0, cfg.vocab_size, (B, T))
+    targets = idx.clone()
+    targets[:, : T // 2] = -1
+
+    _logits, loss = model(idx, targets=targets, kv_cache=None, train_mode=False)
+    assert loss is not None
+    assert torch.isfinite(loss).all()
+
+
+def test_gpt_synaptic_presyn_produces_finite_logits_and_loss():
+    torch.manual_seed(0)
+    syn_cfg = SynapticConfig()
+    syn_cfg.stochastic_train_frac = 0.0
+    cfg = GPTSynapticConfig(
+        sequence_len=32,
+        vocab_size=97,
+        n_layer=2,
+        n_head=2,
+        n_kv_head=1,
+        n_embd=16,
+        dropout=0.0,
+        synapses=True,
+        syn_cfg=syn_cfg,
+    )
+    model = GPTSynaptic(cfg).eval()
+
+    B, T = 2, 12
+    idx = torch.randint(0, cfg.vocab_size, (B, T))
+    targets = idx.clone()
+    targets[:, : T // 2] = -1
+
+    logits, loss = model(idx, targets=targets, kv_cache=None, train_mode=False)
+    assert torch.isfinite(logits).all()
+    assert loss is not None
+    assert torch.isfinite(loss).all()
+
+
+def test_tune_bio_params_top10_specs_match_synaptic_config():
+    import scripts.tune_bio_params as tune
+
+    cfg = SynapticConfig()
+    for spec in tune.TOP10_PARAM_SPECS:
+        assert hasattr(cfg, spec.name), spec.name
+
+
+def test_tune_bio_params_top10_roundtrip_encode_decode():
+    import scripts.tune_bio_params as tune
+
+    cfg = SynapticConfig()
+    vec = tune.encode_params(cfg, tune.TOP10_PARAM_SPECS)
+    decoded = tune.decode_params(vec, tune.TOP10_PARAM_SPECS)
+    for spec in tune.TOP10_PARAM_SPECS:
+        torch.testing.assert_close(
+            torch.tensor(decoded[spec.name]),
+            torch.tensor(getattr(cfg, spec.name)),
+            rtol=1e-6,
+            atol=1e-9,
+        )
+
+
+def test_tune_bio_params_vector_cli_is_param_space():
+    import scripts.tune_bio_params as tune
+
+    cfg = SynapticConfig()
+    parts = [str(float(getattr(cfg, spec.name))) for spec in tune.TOP10_PARAM_SPECS]
+    vec = tune._parse_vector(",".join(parts), tune.TOP10_PARAM_SPECS)
+    decoded = tune.decode_params(vec, tune.TOP10_PARAM_SPECS)
+    for spec in tune.TOP10_PARAM_SPECS:
+        torch.testing.assert_close(
+            torch.tensor(decoded[spec.name]),
+            torch.tensor(float(getattr(cfg, spec.name))),
+            rtol=1e-6,
+            atol=1e-9,
+        )
+
+
+def test_tune_bio_params_generate_batch_targets_are_next_token_copy_half():
+    import scripts.tune_bio_params as tune
+
+    batch = 2
+    seq_len = 8
+    vocab = 23
+    x, y = tune.generate_batch(batch, seq_len, vocab, device="cpu")
+
+    assert x.shape == (batch, seq_len)
+    assert y.shape == (batch, seq_len)
+
+    half = seq_len // 2
+    torch.testing.assert_close(x[:, :half], x[:, half:], rtol=0, atol=0)
+
+    # Next-token targets: only score predictions that generate the second half.
+    assert bool((y[:, : half - 1] == -1).all())
+    torch.testing.assert_close(y[:, half - 1 : seq_len - 1], x[:, half:seq_len], rtol=0, atol=0)
+    assert bool((y[:, -1] == -1).all())
+    assert bool((y != -1).any())
+
+
+def test_tune_bio_params_merge_allgathered_fitness_prefers_finite():
+    import scripts.tune_bio_params as tune
+
+    t0 = torch.tensor([1.0, float("nan"), 3.0], dtype=torch.float64)
+    t1 = torch.tensor([float("nan"), 2.0, float("nan")], dtype=torch.float64)
+    merged = tune._merge_allgathered_fitness([t0, t1])
+    assert merged == [1.0, 2.0, 3.0]
+
+
+def test_tune_bio_params_merge_allgathered_fitness_uses_penalty_if_missing():
+    import scripts.tune_bio_params as tune
+
+    t0 = torch.tensor([float("nan"), float("nan")], dtype=torch.float64)
+    merged = tune._merge_allgathered_fitness([t0])
+    assert merged == [tune.PENALTY_LOSS, tune.PENALTY_LOSS]
+
+
+def test_tune_bio_params_stagnation_improvement_frac():
+    import scripts.tune_bio_params as tune
+
+    # Need window+1 points.
+    assert tune._stagnation_improvement_frac(best_loss_history=[1.0], window_gens=2) is None
+
+    # 1% improvement over 2 gens.
+    frac = tune._stagnation_improvement_frac(best_loss_history=[1.0, 0.995, 0.99], window_gens=2)
+    assert frac is not None
+    assert abs(frac - 0.01) < 1e-9
+
+
+def test_tune_bio_params_rosenbrock_cmaes_converges():
+    import scripts.tune_bio_params as tune
+
+    xbest, fbest = tune.run_rosenbrock_2d_cmaes(seed=1, iterations=80, popsize=8, sigma0=0.5)
+    err = float(np.linalg.norm(np.asarray(xbest) - np.array([1.0, 1.0])))
+    assert err < 1e-2
+    assert fbest < 1e-6
+
+
+def test_tune_bio_params_rosenbrock_rejects_seed_zero():
+    import scripts.tune_bio_params as tune
+
+    with pytest.raises(ValueError, match="non-zero seed"):
+        tune.run_rosenbrock_2d_cmaes(seed=0, iterations=10, popsize=4, sigma0=0.5)
+
+
+def test_core_eval_mc_start_indices_do_not_drop_shared_answer_prefix():
+    from bio_inspired_nanochat import core_eval
+
+    class DummyTokenizer:
+        def __init__(self):
+            self._vocab: dict[str, int] = {}
+            self._next_id = 1
+
+        def get_bos_token_id(self) -> int:
+            return 0
+
+        def __call__(self, prompts, *, prepend: int):
+            if isinstance(prompts, str):
+                prompts = [prompts]
+            out = []
+            for p in prompts:
+                toks = [prepend]
+                for w in p.strip().split():
+                    if w not in self._vocab:
+                        self._vocab[w] = self._next_id
+                        self._next_id += 1
+                    toks.append(self._vocab[w])
+                out.append(toks)
+            return out
+
+    tok = DummyTokenizer()
+    item = {"query": "Q", "choices": ["the cat", "the dog"], "gold": 0}
+    prompt_without, prompts = core_eval.render_prompts_mc(item, " ", fewshot_examples=[])
+    tokens, start_idxs, _end_idxs = core_eval.batch_sequences_mc(tok, prompt_without, prompts)
+
+    # If we incorrectly used the common prefix across *full prompts*, we'd exclude the shared
+    # "the" token from scoring (start index would be after it). The corrected logic aligns a
+    # shared prompt-without-choice against each prompt, so scoring includes the shared prefix.
+    assert len(tokens) == 2
+    assert start_idxs == [2, 2]
