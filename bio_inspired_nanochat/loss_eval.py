@@ -29,14 +29,17 @@ def evaluate_bpb(model, batches, steps, token_bytes):
     each token id, or 0 if the token is to not be counted (e.g. special tokens).
     """
     # record the losses
-    total_nats = torch.tensor(0.0, dtype=torch.float32, device=model.get_device())
-    total_bytes = torch.tensor(0, dtype=torch.int64, device=model.get_device())
+    device = model.get_device()
+    if token_bytes.device != device:
+        token_bytes = token_bytes.to(device)
+    total_nats = torch.tensor(0.0, dtype=torch.float32, device=device)
+    total_bytes = torch.tensor(0, dtype=torch.int64, device=device)
     batch_iter = iter(batches)
     for _ in range(steps):
         x, y = next(batch_iter)
         loss2d = model(x, y, loss_reduction='none') # (B, T)
-        loss2d = loss2d.view(-1) # flatten
-        y = y.view(-1) # flatten
+        loss2d = loss2d.reshape(-1) # flatten
+        y = y.reshape(-1) # flatten
         if (y.int() < 0).any(): # mps does not currently have kernel for < 0 for int64, only int32
             # slightly more complex code path if some target tokens are ignore_index (e.g. -1)
             # any target token < 0 is to be ignored: do NOT index token_bytes with negatives

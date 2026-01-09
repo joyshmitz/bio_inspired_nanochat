@@ -15,7 +15,11 @@ import torch.distributed as dist
 # Prompt rendering utilities
 
 def render_prompts_mc(item, continuation_delimiter, fewshot_examples=None):
-    """Render complete prompts for a multiple choice question"""
+    """Render complete prompts for a multiple choice question.
+
+    Returns:
+        (prompt_without_choice, prompts_with_choice)
+    """
     template_str = """
 {%- for example in fewshot_examples -%}
 {{ example.query }}{{ continuation_delimiter }}{{ example.choices[example.gold] }}
@@ -29,8 +33,9 @@ def render_prompts_mc(item, continuation_delimiter, fewshot_examples=None):
         'continuation_delimiter': continuation_delimiter,
         'item': item
     }
+    prompt_without = template.render(choice="", **context).rstrip()
     prompts = [template.render(choice=choice, **context) for choice in item['choices']]
-    return prompts
+    return prompt_without, prompts
 
 
 def render_prompts_schema(item, continuation_delimiter, fewshot_examples=None):
@@ -110,12 +115,21 @@ def stack_sequences(tokens, pad_token_id):
     return input_ids
 
 
-def batch_sequences_mc(tokenizer, prompts):
-    # In multiple choice, contexts are the same but the continuation is different (common prefix)
+def batch_sequences_mc(tokenizer, prompt_without, prompts):
+    """
+    In multiple choice, contexts are the same but continuation differs.
+
+    Important: Answer options can share prefix tokens (e.g. "the ..."), so using the
+    common prefix across *full prompts* can incorrectly exclude part of the answer
+    from scoring. We instead compute the continuation start per prompt by aligning
+    a shared prompt-without-choice against each full prompt in token space.
+    """
     tokens = tokenizer(prompts, prepend=tokenizer.get_bos_token_id())
-    # figure out the start and end of each continuation
-    answer_start_idx = find_common_length(tokens, direction='left')
-    start_indices = [answer_start_idx] * len(prompts)
+    tokens_without = tokenizer([prompt_without], prepend=tokenizer.get_bos_token_id())[0]
+    start_indices = [
+        find_common_length([tokens_without, t], direction='left')
+        for t in tokens
+    ]
     end_indices = [len(x) for x in tokens]
     return tokens, start_indices, end_indices
 
@@ -149,18 +163,24 @@ def forward_model(model, input_ids):
     """
     batch_size, seq_len = input_ids.size()
     outputs = model(input_ids)
+    if isinstance(outputs, tuple):
+        logits = outputs[0]
+    elif hasattr(outputs, "logits"):
+        logits = outputs.logits
+    else:
+        logits = outputs
     # Roll the tensor to the left by one position to get the (autoregressive) target ids
     target_ids = torch.roll(input_ids, shifts=-1, dims=1)
     # Calculate cross entropy at all positions
     losses = torch.nn.functional.cross_entropy(
-        outputs.view(batch_size * seq_len, -1),
-        target_ids.view(batch_size * seq_len),
+        logits.reshape(batch_size * seq_len, -1),
+        target_ids.reshape(batch_size * seq_len),
         reduction='none'
-    ).view(batch_size, seq_len)
+    ).reshape(batch_size, seq_len)
     # Set the last column to be nan because there is no autoregressive loss there
     losses[:, -1] = float('nan')
     # Get the argmax predictions at each position
-    predictions = outputs.argmax(dim=-1)
+    predictions = logits.argmax(dim=-1)
     return losses, predictions
 
 
@@ -182,8 +202,10 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
 
     # Render prompts and batch sequences based on task type
     if task_type == 'multiple_choice':
-        prompts = render_prompts_mc(item, continuation_delimiter, fewshot_examples)
-        tokens, start_idxs, end_idxs = batch_sequences_mc(tokenizer, prompts)
+        prompt_without, prompts = render_prompts_mc(
+            item, continuation_delimiter, fewshot_examples
+        )
+        tokens, start_idxs, end_idxs = batch_sequences_mc(tokenizer, prompt_without, prompts)
     elif task_type == 'schema':
         prompts = render_prompts_schema(item, continuation_delimiter, fewshot_examples)
         tokens, start_idxs, end_idxs = batch_sequences_schema(tokenizer, prompts)

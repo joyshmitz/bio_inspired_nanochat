@@ -4,7 +4,7 @@ from bio_inspired_nanochat.torch_imports import torch
 import pyarrow.parquet as pq
 
 from bio_inspired_nanochat.common import get_dist_info
-from bio_inspired_nanochat.dataset import list_parquet_files
+from bio_inspired_nanochat.dataset import parquet_paths_for_split
 from bio_inspired_nanochat.tokenizer import get_tokenizer
 
 def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda", resume_state_dict=None):
@@ -25,8 +25,7 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
     # infinite iterator over document batches (list of text strings)
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     def document_batches():
-        parquet_paths = list_parquet_files()
-        parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
+        parquet_paths = parquet_paths_for_split(split)
         resume_pq_idx = resume_state_dict["pq_idx"] if resume_state_dict is not None else 0
         resume_rg_idx = resume_state_dict["rg_idx"] if resume_state_dict is not None else None
         pq_idx = resume_pq_idx # we kick off parquet files at the resume index (or by default just 0)
@@ -75,14 +74,15 @@ def tokenizing_distributed_data_loader_with_state(B, T, split, tokenizer_threads
         # Move tokens from the deque into the scratch buffer
         tokens = [token_buffer.popleft() for _ in range(needed_tokens)]
         # CUDA supports memory pinning for asynchronous transfers between CPU and GPU
-        use_cuda_optimizations = device == "cuda"
+        device_obj = torch.device(device)
+        use_cuda_optimizations = device_obj.type == "cuda"
         scratch = torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda_optimizations) # in PyTorch, long=int64
         # Create the inputs/targets as 1D tensors
         inputs_cpu = scratch[:-1]
         targets_cpu = scratch[1:]
         # Reshape to 2D and move to GPU async
-        inputs = inputs_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
-        targets = targets_cpu.view(B, T).to(device=device, non_blocking=use_cuda_optimizations)
+        inputs = inputs_cpu.view(B, T).to(device=device_obj, non_blocking=use_cuda_optimizations)
+        targets = targets_cpu.view(B, T).to(device=device_obj, non_blocking=use_cuda_optimizations)
         state_dict = {"pq_idx": pq_idx, "rg_idx": rg_idx} # we need this in case we wish to approximately resume training
         yield inputs, targets, state_dict
 

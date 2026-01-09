@@ -14,6 +14,7 @@ from typing import Any, Dict, List
 
 import psutil
 from bio_inspired_nanochat.torch_imports import torch
+from bio_inspired_nanochat.common import get_base_dir
 
 def run_command(cmd):
     """Run a shell command and return output, or None if it fails."""
@@ -85,7 +86,7 @@ def get_system_info():
 
     # User and environment
     info['user'] = os.environ.get('USER', 'unknown')
-    info['nanochat_base_dir'] = os.environ.get('NANOCHAT_BASE_DIR', 'out')
+    info['nanochat_base_dir'] = get_base_dir()
     info['working_dir'] = os.getcwd()
 
     return info
@@ -168,11 +169,25 @@ Generated: {timestamp}
 """
 
     # bloat metrics: package all of the source code and assess its weight
-    packaged = run_command('files-to-prompt . -e py -e md -e rs -e html -e toml -e sh --ignore "*target*" --cxml')
-    num_chars = len(packaged)
-    num_lines = len(packaged.split('\n'))
-    num_files = len([x for x in packaged.split('\n') if x.startswith('<source>')])
-    num_tokens = num_chars // 4 # assume approximately 4 chars per token
+    packaged = run_command(
+        'files-to-prompt . -e py -e md -e rs -e html -e toml -e sh --ignore "*target*" --cxml'
+    )
+    if packaged is None:
+        num_chars_str = "unknown"
+        num_lines_str = "unknown"
+        num_files_str = "unknown"
+        num_tokens_str = "unknown"
+        bloat_note = "- Note: bloat scan unavailable (files-to-prompt failed)\n"
+    else:
+        num_chars = len(packaged)
+        num_lines = len(packaged.split("\n"))
+        num_files = len([x for x in packaged.split("\n") if x.startswith("<source>")])
+        num_tokens = num_chars // 4  # assume approximately 4 chars per token
+        num_chars_str = f"{num_chars:,}"
+        num_lines_str = f"{num_lines:,}"
+        num_files_str = f"{num_files:,}"
+        num_tokens_str = f"{num_tokens:,}"
+        bloat_note = ""
 
     # count dependencies via uv.lock
     uv_lock_lines = 0
@@ -182,10 +197,10 @@ Generated: {timestamp}
 
     header += f"""
 ### Bloat
-- Characters: {num_chars:,}
-- Lines: {num_lines:,}
-- Files: {num_files:,}
-- Tokens (approx): {num_tokens:,}
+{bloat_note}- Characters: {num_chars_str}
+- Lines: {num_lines_str}
+- Files: {num_files_str}
+- Tokens (approx): {num_tokens_str}
 - Dependencies (uv.lock lines): {uv_lock_lines:,}
 
 """
