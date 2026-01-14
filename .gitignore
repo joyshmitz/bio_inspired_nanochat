@@ -14,3 +14,6 @@ rustbpe.pyi.bak
 .envrc
 wandb
 .research/
+
+# bv (beads viewer) local config and caches
+.bv/
