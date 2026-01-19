@@ -196,41 +196,43 @@ Common pitfalls:
 
 ---
 
-## Issue Tracking with bd (beads)
+## Issue Tracking with br (beads_rust)
 
-All issue tracking goes through **bd**. No other TODO systems.
+All issue tracking goes through **br**. No other TODO systems.
+
+**Note:** `br` is non-invasive—it never executes git commands directly. You must run git commands manually after `br sync --flush-only`.
 
 Key invariants:
 
 - `.beads/` is authoritative state and **must always be committed** with code changes.
-- Do not edit `.beads/*.jsonl` directly; only via `bd`.
+- Do not edit `.beads/*.jsonl` directly; only via `br`.
 
 ### Basics
 
 Check ready work:
 
 ```bash
-bd ready --json
+br ready --json
 ```
 
 Create issues:
 
 ```bash
-bd create "Issue title" -t bug|feature|task -p 0-4 --json
-bd create "Issue title" -p 1 --deps discovered-from:bio_inspired_nanochat-123 --json
+br create "Issue title" -t bug|feature|task -p 0-4 --json
+br create "Issue title" -p 1 --deps discovered-from:br-123 --json
 ```
 
 Update:
 
 ```bash
-bd update bio_inspired_nanochat-42 --status in_progress --json
-bd update bio_inspired_nanochat-42 --priority 1 --json
+br update br-42 --status in_progress --json
+br update br-42 --priority 1 --json
 ```
 
 Complete:
 
 ```bash
-bd close bio_inspired_nanochat-42 --reason "Completed" --json
+br close br-42 --reason "Completed" --json
 ```
 
 Types:
@@ -247,17 +249,17 @@ Priorities:
 
 Agent workflow:
 
-1. `bd ready` to find unblocked work.
-2. Claim: `bd update <id> --status in_progress`.
+1. `br ready` to find unblocked work.
+2. Claim: `br update <id> --status in_progress`.
 3. Implement + test.
 4. If you discover new work, create a new bead with `discovered-from:<parent-id>`.
 5. Close when done.
-6. Commit `.beads/` in the same commit as code changes.
+6. Run `br sync --flush-only`, then `git add .beads/ && git commit` in the same commit as code changes.
 
-Auto-sync:
+Sync:
 
-- bd exports to `.beads/issues.jsonl` after changes (debounced).
-- It imports from JSONL when newer (e.g. after `git pull`).
+- Run `br sync --flush-only` to export to `.beads/issues.jsonl`.
+- Then run `git add .beads/ && git commit -m "Update beads"` to commit changes.
 
 Never:
 
@@ -639,23 +641,23 @@ rg -l -t py 'torch\.nn' | xargs ast-grep run -l Python -p 'import torch.nn as $A
 When starting a beads-tracked task:
 
 1. **Pick ready work** (Beads)
-   - `bd ready --json` → choose one item (highest priority, no blockers)
+   - `br ready --json` → choose one item (highest priority, no blockers)
 2. **Reserve edit surface** (Mail)
-   - `file_reservation_paths(project_key, agent_name, ["bio_inspired_nanochat/**"], ttl_seconds=3600, exclusive=true, reason="bd-123")`
+   - `file_reservation_paths(project_key, agent_name, ["bio_inspired_nanochat/**"], ttl_seconds=3600, exclusive=true, reason="br-123")`
 3. **Announce start** (Mail)
-   - `send_message(..., thread_id="bd-123", subject="[bd-123] Start: <short title>", ack_required=true)`
+   - `send_message(..., thread_id="br-123", subject="[br-123] Start: <short title>", ack_required=true)`
 4. **Work and update**
    - Reply in-thread with progress and attach artifacts/images; keep the discussion in one thread per issue id
 5. **Complete and release**
-   - `bd close bd-123 --reason "Completed"` (Beads is status authority)
+   - `br close br-123 --reason "Completed"` (Beads is status authority)
    - `release_file_reservations(project_key, agent_name, paths=["bio_inspired_nanochat/**"])`
-   - Final Mail reply: `[bd-123] Completed` with summary and links
+   - Final Mail reply: `[br-123] Completed` with summary and links
 
 Mapping cheat-sheet:
-- **Mail `thread_id`** ↔ `bd-###`
-- **Mail subject**: `[bd-###] ...`
-- **File reservation `reason`**: `bd-###`
-- **Commit messages (optional)**: include `bd-###` for traceability
+- **Mail `thread_id`** ↔ `br-###`
+- **Mail subject**: `[br-###] ...`
+- **File reservation `reason`**: `br-###`
+- **Commit messages (optional)**: include `br-###` for traceability
 
 ---
 
@@ -671,7 +673,9 @@ Mapping cheat-sheet:
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
+   br sync --flush-only
+   git add .beads/
+   git commit -m "Update beads"
    git push
    git status  # MUST show "up to date with origin"
    ```
