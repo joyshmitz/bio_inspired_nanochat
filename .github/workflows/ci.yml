@@ -81,6 +81,8 @@ jobs:
   python-quality:
     name: Python Quality
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.14.2"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -89,15 +91,15 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
-        with:
-          python-version-file: .python-version
+      - name: Install Python 3.14
+        run: uv python install 3.14.2
 
       - name: Sync dependencies (cpu)
         run: uv sync --extra cpu --dev
 
       - name: Install UBS
         run: |
-          curl -sSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/main/install.sh | bash
+          curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh?$(date +%s)" | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Determine diff base
@@ -126,6 +128,8 @@ jobs:
     name: Build Wheel
     runs-on: ubuntu-latest
     needs: [rust-fmt, rust-clippy]
+    env:
+      UV_PYTHON: "3.14.2"
     steps:
       - uses: actions/checkout@v4
 
@@ -134,8 +138,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
-        with:
-          python-version-file: .python-version
+      - name: Install Python 3.14
+        run: uv python install 3.14.2
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
@@ -167,6 +171,8 @@ jobs:
     name: Integration Tests
     runs-on: ubuntu-latest
     needs: [build-wheel, python-quality]
+    env:
+      UV_PYTHON: "3.14.2"
     steps:
       - uses: actions/checkout@v4
 
@@ -175,8 +181,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
-        with:
-          python-version-file: .python-version
+      - name: Install Python 3.14
+        run: uv python install 3.14.2
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
