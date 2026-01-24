@@ -1,4 +1,4 @@
-use ndarray::{Array3, Array4, ArrayD, Axis, s};
+use ndarray::{Array3, Array4, s};
 use numpy::{IntoPyArray, PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -255,7 +255,7 @@ pub fn presyn_step_cpu<'py>(
                 let mut sum_drive = 0.0;
                 for j in 0..=t {
                     let val = logits_bh[[t, j]];
-                    let clamped = val.max(-20.0).min(20.0);
+                    let clamped = val.clamp(-20.0, 20.0);
                     let drive = softplus(clamped);
                     sum_drive += drive;
                 }
@@ -281,7 +281,7 @@ pub fn presyn_step_cpu<'py>(
                     - c.alpha_buf_off * buf_val;
 
                 c_new_vec.push(c_next.max(0.0));
-                buf_new_vec.push(buf_next.max(0.0).min(1.0));
+                buf_new_vec.push(buf_next.clamp(0.0, 1.0));
 
                 let pr_val = pr_bh[t];
                 let rrp_val = rrp_bh[t];
@@ -289,13 +289,11 @@ pub fn presyn_step_cpu<'py>(
                 let e_val = e_bh[t];
 
                 let pr_mid = (rho_p * pr_val + c.alpha_prime * (1.0 - pr_val))
-                    .max(0.0)
-                    .min(1.0);
+                    .clamp(0.0, 1.0);
                 let rrp_refill = (rho_r * rrp_val + c.alpha_refill * res_val)
-                    .max(0.0)
-                    .min(1.0);
-                let res_mid = (res_val - c.alpha_refill * res_val).max(0.0).min(1.0);
-                let e_mid = (rho_e * e_val + c.energy_in).max(0.0).min(1.6);
+                    .clamp(0.0, 1.0);
+                let res_mid = (res_val - c.alpha_refill * res_val).clamp(0.0, 1.0);
+                let e_mid = (rho_e * e_val + c.energy_in).clamp(0.0, 1.6);
 
                 pr_mid_vec.push(pr_mid);
                 rrp_refill_vec.push(rrp_refill);
@@ -332,7 +330,7 @@ pub fn presyn_step_cpu<'py>(
                     let fuse_p = fuse_base * d_bilin;
                     let avail = rrp_refill_vec[t];
 
-                    let rr = (fuse_p * avail).max(0.0).min(1.0);
+                    let rr = (fuse_p * avail).clamp(0.0, 1.0);
                     raw_release_row.push(rr);
                     row_sum += rr;
                 }
@@ -355,13 +353,12 @@ pub fn presyn_step_cpu<'py>(
 
             for t in 0..t_dim {
                 let used = used_rrp[t];
-                let rrp_n = (rrp_refill_vec[t] - used).max(0.0).min(1.0);
-                let res_n = (res_mid_vec[t] + used).max(0.0).min(1.0);
-                let pr_n = (pr_mid_vec[t] - c.alpha_unprime * used).max(0.0).min(1.0);
+                let rrp_n = (rrp_refill_vec[t] - used).clamp(0.0, 1.0);
+                let res_n = (res_mid_vec[t] + used).clamp(0.0, 1.0);
+                let pr_n = (pr_mid_vec[t] - c.alpha_unprime * used).clamp(0.0, 1.0);
                 let e_n =
                     (e_mid_vec[t] - c.energy_cost_rel * used - c.energy_cost_pump * (1.0 - res_n))
-                        .max(0.0)
-                        .min(1.6);
+                        .clamp(0.0, 1.6);
 
                 let qamp = sigmoid(c.q_beta * (e_n - 0.5)) * c.qmax;
 

@@ -3,13 +3,16 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArrayDyn};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
+/// Result type for functions returning a pair of f32 arrays
+type ArrayPairResult<'py> = PyResult<(Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<f32>>)>;
+
 #[pyfunction]
 pub fn accumulate_router_stats_cpu<'py>(
     py: Python<'py>,
     idx: PyReadonlyArrayDyn<'py, i64>,
     gates: PyReadonlyArrayDyn<'py, f32>,
     num_experts: usize,
-) -> PyResult<(Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<f32>>)> {
+) -> ArrayPairResult<'py> {
     let idx_arr = idx.as_array();
     let gates_arr = gates.as_array();
 
@@ -90,7 +93,7 @@ pub fn update_metabolism_cpu<'py>(
     alpha_fatigue: PyReadonlyArrayDyn<'py, f32>,
     alpha_energy: PyReadonlyArrayDyn<'py, f32>,
     util: PyReadonlyArrayDyn<'py, f32>,
-) -> PyResult<(Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<f32>>)> {
+) -> ArrayPairResult<'py> {
     // Ensure 1D
     let f = fatigue
         .as_array()
