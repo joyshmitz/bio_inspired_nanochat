@@ -184,6 +184,7 @@ jobs:
     needs: [build-wheel, python-quality]
     env:
       UV_PYTHON: "3.14.2"
+      PYTHONPATH: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
 
