@@ -94,12 +94,23 @@ jobs:
       - name: Install Python 3.14
         run: uv python install 3.14.2
 
+      - name: Install ast-grep
+        run: |
+          set -euo pipefail
+          AST_GREP_VERSION="0.40.5"
+          ASSET="app-x86_64-unknown-linux-gnu.zip"
+          curl -fsSL "https://github.com/ast-grep/ast-grep/releases/download/${AST_GREP_VERSION}/${ASSET}" -o /tmp/ast-grep.zip
+          unzip -q /tmp/ast-grep.zip -d /tmp/ast-grep
+          install -m 0755 /tmp/ast-grep/ast-grep "$HOME/.local/bin/ast-grep"
+          install -m 0755 /tmp/ast-grep/sg "$HOME/.local/bin/sg"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Sync dependencies (cpu)
         run: uv sync --extra cpu --dev
 
       - name: Install UBS
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh?$(date +%s)" | bash
+          curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh?$(date +%s)" | bash -s -- --non-interactive
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Determine diff base

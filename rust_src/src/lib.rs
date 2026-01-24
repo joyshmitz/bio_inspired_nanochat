@@ -381,15 +381,12 @@ impl Tokenizer {
                         }
                         m
                     })
-                    .reduce(
-                        AHashMap::new,
-                        |mut a, b| {
-                            for (k, v) in b {
-                                *a.entry(k).or_default() += v;
-                            }
-                            a
-                        },
-                    )
+                    .reduce(AHashMap::new, |mut a, b| {
+                        for (k, v) in b {
+                            *a.entry(k).or_default() += v;
+                        }
+                        a
+                    })
             });
 
             // Merge local into global (single-threaded)

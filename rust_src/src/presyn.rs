@@ -288,10 +288,8 @@ pub fn presyn_step_cpu<'py>(
                 let res_val = res_bh[t];
                 let e_val = e_bh[t];
 
-                let pr_mid = (rho_p * pr_val + c.alpha_prime * (1.0 - pr_val))
-                    .clamp(0.0, 1.0);
-                let rrp_refill = (rho_r * rrp_val + c.alpha_refill * res_val)
-                    .clamp(0.0, 1.0);
+                let pr_mid = (rho_p * pr_val + c.alpha_prime * (1.0 - pr_val)).clamp(0.0, 1.0);
+                let rrp_refill = (rho_r * rrp_val + c.alpha_refill * res_val).clamp(0.0, 1.0);
                 let res_mid = (res_val - c.alpha_refill * res_val).clamp(0.0, 1.0);
                 let e_mid = (rho_e * e_val + c.energy_in).clamp(0.0, 1.6);
 
