@@ -1,5 +1,5 @@
 [environment]
-python = "/data/projects/bio_inspired_nanochat/.venv/bin/python"
+# Use virtual environment python when available; ty will auto-detect if not specified
 
 [src]
 include = [
