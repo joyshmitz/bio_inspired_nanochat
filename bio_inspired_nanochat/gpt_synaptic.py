@@ -304,6 +304,30 @@ class GPTSynaptic(nn.Module):
         loss = ce + aux
         return logits, loss
 
+    @torch.no_grad()
+    def reset_sequence_state(
+        self, *, reset_fast_weights: bool = False, reset_consolidation: bool = True
+    ) -> int:
+        """Reset the per-sequence fast/eligibility state across all synaptic layers (vg9.4).
+
+        Call at sequence boundaries so one sequence's fast adaptation does not leak into the
+        next: in inference, at generation start / KV-cache reset (a new prompt is a new
+        scratchpad); in training, optionally between steps (each batch is independent
+        sequences). The presyn state (calcium/RRP) lives in the KV cache / is rebuilt per
+        forward, so it is reset separately by rebuilding presyn_state. See
+        SynapticLinear.reset_sequence_state for the per-sequence vs persistent contract.
+
+        Returns the number of synaptic layers reset.
+        """
+        n = 0
+        for module in self.modules():
+            if isinstance(module, SynapticLinear):
+                module.reset_sequence_state(
+                    reset_fast_weights=reset_fast_weights, reset_consolidation=reset_consolidation
+                )
+                n += 1
+        return n
+
     def setup_optimizers(
         self,
         unembedding_lr=0.004,

@@ -974,6 +974,21 @@ class PostsynapticHebb(nn.Module):
             return
         self.fast.mul_(self.cfg.post_fast_decay).add_(self.cfg.post_fast_lr * delta)
 
+    @torch.no_grad()
+    def reset_sequence_state(
+        self, *, reset_fast_weights: bool = False, reset_consolidation: bool = True
+    ) -> None:
+        """Reset the PER-SEQUENCE postsynaptic state (vg9.4). Persists slow/U/V (consolidated,
+        backprop-trained). See SynapticLinear.reset_sequence_state for the full contract."""
+        if reset_consolidation:
+            self.camkii.zero_()
+            self.pp1.fill_(0.5)
+            self.bdnf.zero_()
+            self.bdnf_hebb_accum.zero_()
+            self._last_hebb_delta_mag.zero_()
+        if reset_fast_weights:
+            self.fast.zero_()
+
     def get_bdnf_metrics(self) -> Dict[str, float]:
         """Get BDNF-related metrics for logging/monitoring.
 
@@ -1110,6 +1125,40 @@ class SynapticLinear(nn.Module):
             self.w_slow.add_(self.cfg.post_slow_lr * delta)
         self.post.hebb_fast(self.u_buf, self.v_buf)
         self.post.consolidate(self.u_buf, self.v_buf)
+
+    @torch.no_grad()
+    def reset_sequence_state(
+        self, *, reset_fast_weights: bool = False, reset_consolidation: bool = True
+    ) -> None:
+        """Reset the PER-SEQUENCE fast/eligibility state at a sequence boundary (vg9.4).
+
+        These module buffers/params persist across forwards and were never reset, so one
+        sequence's writes leaked into the next. Contract:
+
+          PER-SEQUENCE (always reset): eligibility traces u_buf/v_buf and the deferred-plasticity
+            bookkeeping (_plasticity_pending / _last_gate_scale).
+          reset_consolidation (default True): the CaMKII/PP1/BDNF gate + metaplasticity state
+            (in post). The "cel" consolidation-across-sequences mode passes False to carry it.
+          reset_fast_weights (default False): also zero the fast weights w_fast / post.fast for
+            STRICT working-memory isolation. NOTE: w_fast is a backprop-trained Parameter, so
+            this discards its trained component — a proper Parameter/buffer split is future work.
+          PERSISTENT (never reset): slow weights w_slow / post.slow, low-rank U/V, the fixed
+            random projections proj_in/proj_out, bias, and the presyn EMA.
+
+        Call at a sequence boundary (no autograd graph pending) — it writes Parameters in place.
+        """
+        if self.u_buf is not None:
+            self.u_buf.zero_()
+        if self.v_buf is not None:
+            self.v_buf.zero_()
+        self._plasticity_pending = False
+        self._last_gate_scale = None
+        if reset_fast_weights and self.w_fast is not None:
+            self.w_fast.zero_()
+        if self.post is not None:
+            self.post.reset_sequence_state(
+                reset_fast_weights=reset_fast_weights, reset_consolidation=reset_consolidation
+            )
 
     def forward(
         self, x: Tensor, calcium: Tensor, energy: Tensor, update_mem: bool = True, genes: Optional[Tensor] = None
