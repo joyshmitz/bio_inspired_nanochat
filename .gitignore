@@ -17,3 +17,9 @@ wandb
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# Coverage artifacts (eqyk.1)
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml

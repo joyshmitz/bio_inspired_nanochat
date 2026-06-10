@@ -47,16 +47,57 @@ manifest-path = "rust_src/Cargo.toml"
 dev = [
     "maturin>=1.9.4",
     "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
 ]
 
 [tool.pytest.ini_options]
+# Marker taxonomy (eqyk.1). Use markers to scope CI runs:
+#   unit  - fast, deterministic, no GPU/network/data downloads (PR gate)
+#   e2e   - end-to-end runs that exercise a whole flow (nightly)
+#   slow  - long-running (deselect with -m "not slow")
+#   gpu   - requires CUDA; auto-skipped on CPU-only hosts (see conftest.py)
+#   golden- compares against committed golden artifacts under tests/golden/
 markers = [
+    "unit: fast, deterministic unit test (PR gate, no GPU/network)",
+    "e2e: end-to-end test exercising a full flow (nightly)",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: requires CUDA; auto-skipped on CPU-only hosts",
+    "golden: compares against committed golden artifacts (tests/golden/)",
 ]
+# --strict-markers: an unregistered @pytest.mark.* is an error, never a silent typo.
+addopts = "--strict-markers -ra"
+# Make the in-repo `bio_inspired_nanochat` package importable without a full
+# editable/maturin install (the Rust `rustbpe` extension is optional for most
+# tests and is auto-skipped when absent). This lets `pytest` run after a plain
+# `uv sync --no-install-project`.
+pythonpath = ["."]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+
+# Coverage config (eqyk.1). The gate is OPT-IN via `--cov` (see TESTING.md / CI),
+# so the default fast `pytest` stays lightweight. CI runs `pytest --cov` and the
+# fail_under gate below blocks regressions on the bio modules.
+[tool.coverage.run]
+branch = true
+source = ["bio_inspired_nanochat"]
+omit = [
+    "*/tests/*",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+# Initial floor; ratchet upward as the test suite grows (do NOT lower it).
+fail_under = 25
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
 
 # target torch to cuda 12.8 or CPU
 [tool.uv.sources]

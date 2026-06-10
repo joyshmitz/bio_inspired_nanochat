@@ -23,15 +23,16 @@ from typing import Any, cast
 import regex as re
 from collections import Counter, defaultdict
 import time
-import rustbpe
-import tiktoken
 import pytest
+import tiktoken
 from tokenizers import Tokenizer as HFTokenizer
 from tokenizers import decoders, pre_tokenizers, Regex
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 
-rustbpe = cast(Any, rustbpe)
+# The compiled Rust extension is optional (built via `maturin develop`). Skip this
+# whole module cleanly when it isn't built, instead of breaking test collection.
+rustbpe = cast(Any, pytest.importorskip("rustbpe"))
 
 GPT4_SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
 
