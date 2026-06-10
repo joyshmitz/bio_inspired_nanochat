@@ -472,7 +472,194 @@ class SynapticPresyn(nn.Module):
         # EMA normalization
         s = e.detach().abs().mean().clamp_min(1e-3)
         self.ema_e.mul_(0.99).add_(0.01 * s)
-        
+
+        return e / (self.ema_e + 1e-6)
+
+    def _faithful_release_prob(
+        self, c_edge: Tensor, pr_edge: Tensor, cl_edge: Tensor, drive: Tensor
+    ) -> Tensor:
+        """Canonical per-edge release PROBABILITY in [0,1] (8j9.2).
+
+        The differentiable equivalent of forward()'s faithful release math: Hill-function
+        calcium sensing (Syt1 fast + Syt7 slow), complexin/SNARE gating, and the q.k bilinear
+        term. The Doc2 facilitation term is PRESERVED from release()'s sigmoid mix (forward()
+        lacks it) so no feature is lost. Replaces release()'s sigmoid `_mix_prob`.
+        """
+        cfg = self.cfg
+        fast = c_edge / (c_edge + cfg.syt_fast_kd)
+        slow = c_edge / (c_edge + cfg.syt_slow_kd)
+        syt = (
+            0.7 * fast
+            + 0.3 * slow
+            + cfg.doc2_gain * torch.sigmoid(4.0 * (c_edge - 0.12))  # Doc2 facilitation (preserved)
+        )
+        fuse_base = torch.sigmoid(3.0 * syt + 2.0 * pr_edge - 2.0 * (cl_edge + cfg.complexin_bias))
+        d_bilin = torch.sigmoid(drive)  # drive == q.k/sqrt(d), the top-k attention logit
+        return (fuse_base * d_bilin).clamp(0.0, 1.0)
+
+    def release_canonical(
+        self,
+        state: Dict[str, Any],
+        drive: Tensor,
+        idx: Tensor,
+        train: bool,
+        valid: Optional[Tensor] = None,
+    ) -> Tensor:
+        """CANONICAL unified presynaptic release — the single, faithful, differentiable
+        source of truth (8j9.2).
+
+        Ports forward()'s biologically-faithful equations — Hill Syt(C)=C/(C+Kd), the calcium
+        BUFFER ODE (BUF, which release() ignored), energy->AMPA `qamp`, and the septin distance
+        barrier — onto release()'s top-k, key-indexed, differentiable scatter structure.
+
+        Differentiability scope (per 8j9.2 scope boundary): the RETURNED bias is differentiable
+        w.r.t. the INPUT `drive` (parity with what release() feeds into the attention logits).
+        The STATE RECURRENCE is detached — making the kinetics recurrence differentiable via
+        BPTT is the separate yw9 epic. Preserves the stochastic STE path, the endocytosis DELAY
+        queue, Doc2, and EMA normalization. AMP is carried but superseded by energy->qamp (the
+        faithful amplitude); the vestigial AMP dynamics are removed in the param-unify step.
+
+        drive: (B,H,T,K) top-k attention logits; idx: (B,H,T,K) selected key indices.
+        Returns per-edge release e (B,H,T,K) consumed as lambda_loge*log(eps+e).
+        """
+        if not self.cfg.enable_presyn:
+            return torch.ones_like(drive)
+
+        cfg = self.cfg
+        B, H, T, K = drive.shape
+        if valid is not None and valid.shape != drive.shape:
+            raise ValueError(
+                f"valid mask must match drive shape {drive.shape}, got {valid.shape}"
+            )
+        dtype = state["C"].dtype
+        flat_idx = idx.reshape(B, H, -1)
+
+        rho_c = math.exp(-1.0 / cfg.tau_c)   # faithful calcium decay (vs release()'s raw tau_c)
+        rho_b = math.exp(-1.0 / cfg.tau_buf)  # buffer decay
+
+        # --- gather per-edge state for the selected keys (prior state is detached) ---
+        c_prev = state["C"].gather(2, flat_idx).view(B, H, T, K)
+        buf_prev = state["BUF"].gather(2, flat_idx).view(B, H, T, K)
+        pr_edge = state["PR"].gather(2, flat_idx).view(B, H, T, K)
+        cl_edge = state["CL"].gather(2, flat_idx).view(B, H, T, K)
+        rrp_edge = state["RRP"].gather(2, flat_idx).view(B, H, T, K)
+        e_energy = state["E"].gather(2, flat_idx).view(B, H, T, K)
+
+        # --- calcium + buffer ODE (BUF now ACTIVE; influx carries the grad w.r.t. drive) ---
+        influx = cfg.alpha_ca * F.softplus(drive)
+        c_edge = (
+            rho_c * c_prev + influx
+            - cfg.alpha_buf_on * c_prev * (1.0 - buf_prev)
+            + cfg.alpha_buf_off * buf_prev
+        ).clamp(min=0.0)
+
+        # --- faithful Hill release probability, then release = p * available RRP (<= RRP) ---
+        p = self._faithful_release_prob(c_edge, pr_edge, cl_edge, drive)
+        if train and cfg.stochastic_train_frac > 0:
+            do_stoch = torch.rand_like(p[..., 0].to(torch.float32)) < float(
+                cfg.stochastic_train_frac
+            )
+            rel_det = p * rrp_edge
+            if do_stoch.any():
+                stoch_mask = do_stoch.unsqueeze(-1).expand_as(p)
+                k_rel = _sample_binomial_counts(
+                    probs=p[stoch_mask],
+                    total_count=torch.clamp(
+                        rrp_edge[stoch_mask], 0.0, float(cfg.stochastic_count_cap)
+                    ),
+                    max_count=int(cfg.stochastic_count_cap),
+                    tau=float(cfg.stochastic_tau),
+                    mode=cfg.stochastic_mode,
+                )
+                rel = rel_det.clone()
+                rel[stoch_mask] = k_rel
+            else:
+                rel = rel_det
+        else:
+            rel = p * rrp_edge
+        if valid is not None:
+            rel = rel * valid.to(rel.dtype)
+
+        # --- energy-derived AMPA amplitude (faithful) ---
+        qamp = torch.sigmoid(cfg.q_beta * (e_energy - 0.5)) * cfg.qmax
+
+        # --- septin distance barrier: penalize long-range edges using real key positions ---
+        qpos = torch.arange(T, device=drive.device, dtype=torch.float32).view(1, 1, T, 1)
+        dist = (qpos - idx.to(torch.float32)).abs() / float(max(1, T))
+        barrier = torch.exp(-cfg.barrier_strength * dist).to(rel.dtype)
+
+        e = rel * qamp * barrier
+
+        # === scatter faithful state updates back to key positions (recurrence DETACHED) ===
+        with torch.no_grad():
+            flat_rel = rel.detach().reshape(B, H, -1).to(dtype)
+            flat_drive = drive.detach().reshape(B, H, -1).to(dtype)
+            if valid is not None:
+                flat_valid_bool = valid.reshape(B, H, -1)
+                flat_valid = flat_valid_bool.to(dtype)
+                flat_drive = torch.where(
+                    flat_valid_bool, flat_drive, torch.zeros_like(flat_drive)
+                )
+            else:
+                flat_valid = torch.ones_like(flat_rel)
+
+            add_vals = torch.zeros_like(state["C"])
+            drv_vals = torch.zeros_like(state["C"])
+            cnt_vals = torch.zeros_like(state["C"])
+            add_vals.scatter_add_(2, flat_idx, flat_rel)    # vesicles released per key
+            drv_vals.scatter_add_(2, flat_idx, flat_drive)  # accumulated drive per key
+            cnt_vals.scatter_add_(2, flat_idx, flat_valid)  # access count per key
+            accessed = (cnt_vals > 0).to(dtype)
+
+            # calcium + buffer at key positions (faithful BUF ODE)
+            c_k, buf_k = state["C"], state["BUF"]
+            c_up = (
+                rho_c * c_k + cfg.alpha_ca * F.softplus(drv_vals) * accessed
+                - cfg.alpha_buf_on * c_k * (1.0 - buf_k)
+                + cfg.alpha_buf_off * buf_k
+            ).clamp(min=0.0)
+            buf_up = (
+                rho_b * buf_k + cfg.alpha_buf_on * c_k * (1.0 - buf_k)
+                - cfg.alpha_buf_off * buf_k
+            ).clamp(0.0, 1.0)
+
+            # RRP depletion + endocytosis delay queue + priming refill
+            rrp_up = torch.clamp(state["RRP"] - add_vals, 0)
+            if cfg.endo_delay > 0:
+                res_up = state["RES"] + state["DELAY"][0]
+                new_delay = state["DELAY"][1:] + [add_vals * cfg.rec_rate]
+            else:
+                res_up = state["RES"]
+                new_delay = []
+            take = torch.minimum(res_up, torch.ones_like(res_up))
+            res_up = torch.clamp(res_up - cfg.prime_rate * take, 0)
+            rrp_up = torch.clamp(rrp_up + cfg.prime_rate * take, 0, 30.0)
+
+            # SNARE recovery / complexin clamp relaxation / energy metabolism
+            sn_up = torch.clamp(
+                state["PR"] * (1.0 - cfg.unprime_per_release * add_vals)
+                + cfg.nsf_recover * (1.0 - state["PR"]),
+                0, 1,
+            )
+            cl_up = torch.clamp(
+                state["CL"] * 0.995 + 0.005 - cfg.unprime_per_release * add_vals, 0, 1
+            )
+            en_up = torch.clamp(
+                state["E"]
+                + cfg.energy_fill * (cfg.energy_max - state["E"])
+                - cfg.energy_use * add_vals,
+                0, cfg.energy_max,
+            )
+
+            state.update({
+                "C": c_up, "BUF": buf_up, "RRP": rrp_up, "RES": res_up, "DELAY": new_delay,
+                "PR": sn_up, "CL": cl_up, "AMP": state["AMP"], "E": en_up,
+            })
+
+            # EMA normalization (parity with release())
+            s = e.detach().abs().mean().clamp_min(1e-3)
+            self.ema_e.mul_(0.99).add_(0.01 * s)
+
         return e / (self.ema_e + 1e-6)
 
     @torch.no_grad()
