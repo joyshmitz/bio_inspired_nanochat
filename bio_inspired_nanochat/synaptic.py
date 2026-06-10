@@ -145,7 +145,7 @@ class SynapticConfig:
     )
     stochastic_tau: float = 1.0
     stochastic_count_cap: int = 8
-    
+
     # Presynaptic Biophysics
     # tau_c is a calcium-decay TIME CONSTANT: retention per step is exp(-1/tau_c), used uniformly
     # by release(), release_canonical, forward(), and the dashboard. Default 6.0 => retention
@@ -165,7 +165,7 @@ class SynapticConfig:
     endo_delay: int = 3
     amp_load: float = 0.02
     amp_leak: float = 0.006
-    
+
     # Initial States
     init_rrp: float = 6.0
     init_reserve: float = 18.0
@@ -173,12 +173,12 @@ class SynapticConfig:
     init_clamp: float = 0.6
     init_amp: float = 1.0
     init_energy: float = 0.85
-    
+
     # Energy Dynamics
     energy_fill: float = 0.02
     energy_use: float = 0.02
     energy_max: float = 1.0
-    
+
     # Attention
     lambda_loge: float = 1.0
     barrier_strength: float = 0.1
@@ -188,7 +188,7 @@ class SynapticConfig:
     # without a clamp a single edge's bias can dominate the softmax and destabilize
     # attention. 10.0 keeps the mechanism intact while bounding it; 0 disables (vg9.5).
     loge_bias_clamp: float = 10.0
-    
+
     # Rust Kernel Compat
     tau_buf: float = 4.0
     tau_prime: float = 5.0
@@ -208,7 +208,7 @@ class SynapticConfig:
     complexin_bias: float = 0.0
     qmax: float = 2.0
     q_beta: float = 1.0
-    
+
     # Postsynaptic Plasticity
     post_fast_decay: float = 0.95
     post_fast_lr: float = 1.5e-3
@@ -252,7 +252,7 @@ class SynapticConfig:
     enable_hebbian: bool = True
     enable_metabolism: bool = True
     use_flex_attention: bool = False
-    
+
     # Native (Rust) Kernel Toggles
     native_presyn: bool = decouple_config("BIO_FUSED_PRESYN", default=False, cast=bool)
     native_metrics: bool = decouple_config("BIO_FUSED_METRICS", default=False, cast=bool)
@@ -373,19 +373,19 @@ class SynapticPresyn(nn.Module):
         # Efficient scatter:
         # We want to add 'rel' (B,H,T,K) to 'state' (B,H,T_key) at indices 'idx' (B,H,T,K).
         # We can flatten T,K.
-        
+
         # flat_idx = idx.view(B, H, -1) # (B, H, T*K)
         flat_rel = rel.view(B, H, -1)
         flat_drive = drive.view(B, H, -1)
         flat_amp = amp.view(B, H, -1)
-        
+
         # Accumulators
         add_vals = torch.zeros_like(state["C"])  # (B, H, T_key)
         drv_vals = torch.zeros_like(state["C"])
         snu_vals = torch.zeros_like(state["C"])
         rru_vals = torch.zeros_like(state["C"])
         ampu_vals = torch.zeros_like(state["C"])
-        
+
         # scatter_add_ expects index to have same number of dimensions as self.
         # self is (B, H, T_key). flat_idx is (B, H, T*K).
         # We need to expand self to match index dims? No, scatter_add_ reduces.
@@ -402,7 +402,7 @@ class SynapticPresyn(nn.Module):
         # state["c"] is likely float32 or bfloat16.
         # flat_rel is derived from p * rrp.
         # Let's check dtypes.
-        
+
         # Ensure dtypes match
         dtype = state["C"].dtype
         flat_rel = flat_rel.to(dtype)
@@ -416,13 +416,13 @@ class SynapticPresyn(nn.Module):
             flat_amp = flat_amp * flat_valid
         else:
             flat_valid = torch.ones_like(flat_rel)
-        
+
         add_vals.scatter_add_(2, flat_idx, flat_rel)
         drv_vals.scatter_add_(2, flat_idx, flat_drive)
         snu_vals.scatter_add_(2, flat_idx, flat_valid) # Count of accesses
         rru_vals.scatter_add_(2, flat_idx, flat_rel)
         ampu_vals.scatter_add_(2, flat_idx, flat_amp)
-        
+
         # Update dynamics
         accessed = snu_vals > 0
         c_up = (
@@ -430,7 +430,7 @@ class SynapticPresyn(nn.Module):
             + cfg.alpha_c * F.softplus(drv_vals) * accessed.to(dtype)
         )
         rrp_up = torch.clamp(state["RRP"] - add_vals, 0)
-        
+
         # Endocytosis delay queue
         if cfg.endo_delay > 0:
             res_up = state["RES"] + state["DELAY"][0]
@@ -438,13 +438,13 @@ class SynapticPresyn(nn.Module):
         else:
             res_up = state["RES"]
             new_delay = []
-        
+
         # Priming
         take = torch.minimum(res_up, torch.ones_like(res_up)) # Max 1 unit per step? Or just soft clamp?
         # PDF: take=torch.minimum(res_up, torch.ones_like(res_up))
         res_up = torch.clamp(res_up - cfg.prime_rate * take, 0)
         rrp_up = torch.clamp(rrp_up + cfg.prime_rate * take, 0, 30.0) # Cap RRP
-        
+
         # SNARE / Clamp / AMPA / Energy
         sn_up = torch.clamp(
             state["PR"] * (1.0 - cfg.unprime_per_release * add_vals)
@@ -469,7 +469,7 @@ class SynapticPresyn(nn.Module):
             0,
             cfg.energy_max,
         )
-        
+
         state.update({
             "C": c_up,
             "RRP": rrp_up,
@@ -481,7 +481,7 @@ class SynapticPresyn(nn.Module):
             "E": en_up,
             "BUF": state["BUF"],
         })
-        
+
         # EMA normalization
         s = e.detach().abs().mean().clamp_min(1e-3)
         self.ema_e.mul_(0.99).add_(0.01 * s)
@@ -1025,17 +1025,17 @@ class SynapticLinear(nn.Module):
         super().__init__()
         object.__setattr__(self, "cfg", cfg)
         object.__setattr__(self, "use_input_ln", use_input_ln)
-        
+
         # Standard weights
         self.w_slow = nn.Parameter(torch.empty(in_features, out_features))
         # Only allocate fast weights/Hebbian params if enabled
         if cfg.enable_hebbian:
             self.w_fast = nn.Parameter(torch.empty(in_features, out_features))
             nn.init.trunc_normal_(self.w_fast, std=0.02)
-            
+
             # Postsynaptic module (operates on output)
             self.post = PostsynapticHebb(in_features, out_features, cfg)
-            
+
             # Eligibility buffers
             self.register_buffer("u_buf", torch.zeros(in_features, cfg.rank_eligibility))
             self.register_buffer("v_buf", torch.zeros(cfg.rank_eligibility, out_features))
@@ -1060,7 +1060,7 @@ class SynapticLinear(nn.Module):
         else:
             self.register_parameter("bias", None)
         nn.init.trunc_normal_(self.w_slow, std=0.02)
-        
+
         if use_input_ln:
             self.input_ln = nn.LayerNorm(in_features, eps=1e-5)
         else:
@@ -1207,11 +1207,11 @@ class SynapticLinear(nn.Module):
             y = x @ self.w_slow
         if self.bias is not None:
             y = y + self.bias
-            
+
         # Postsynaptic modulation (diagonal fast/slow + low-rank)
         if self.cfg.enable_hebbian and self.post is not None:
             y = self.post(y)
-        
+
             # vg9.2: online Hebbian plasticity. Previously gated behind
             # `not torch.is_grad_enabled()`, so the headline "online learning" NEVER ran during
             # training. It now runs as a DETACHED fast-adaptation update during inference
@@ -1303,7 +1303,7 @@ class SynapticCausalSelfAttention(nn.Module):
         self.head_dim = n_embd // n_head
         self.layer_idx = int(layer_idx)
         object.__setattr__(self, "cfg", cfg)
-        
+
         if cfg.use_flex_attention:
             if not _HAS_FLEX:
                 raise ImportError(
@@ -1543,7 +1543,7 @@ class SynapticExpert(nn.Module):
         # x: (N, C)
         N = x.size(0)
         device = x.device
-        
+
         if energy_override is not None:
             if energy_override.ndim == 0:
                 e_tens = energy_override.expand(N)
@@ -1551,7 +1551,7 @@ class SynapticExpert(nn.Module):
                 e_tens = energy_override.view(-1).expand(N)
         else:
             e_tens = torch.ones(N, device=device)
-            
+
         c_tens = torch.ones(N, device=device)
 
         y = self.fc1(
@@ -1612,9 +1612,9 @@ class SynapticMoE(nn.Module):
         )  # updated by EMA-style rule
         object.__setattr__(self, "last_aux_loss", None)
         object.__setattr__(self, "last_ctx", {})
-        
+
         # Molecular Genetics: Xi (The Genome)
-        self.Xi = nn.Parameter(torch.zeros(num_experts, cfg.xi_dim)) 
+        self.Xi = nn.Parameter(torch.zeros(num_experts, cfg.xi_dim))
         nn.init.normal_(self.Xi, std=0.1)
 
     def _get_phenotype(self, xi: Tensor) -> Tensor:
@@ -1631,13 +1631,13 @@ class SynapticMoE(nn.Module):
         device = x.device
         fatigue_buf = self.fatigue
         energy_buf = self.energy
-        
+
         pheno = self._get_phenotype(self.Xi) # (E, 4)
         alpha_fatigue = pheno[:, 0]
         alpha_energy = pheno[:, 1]
-        
+
         logits = self.router(x)  # (B,T,E)
-        
+
         # Router bias logic (same as before)
         tok_proxy = x.mean(dim=-1, keepdim=True)
         base_bias = 0.02 * tok_proxy.expand(-1, -1, E)
@@ -1649,9 +1649,9 @@ class SynapticMoE(nn.Module):
         align_bias = 0.02 * torch.einsum("btd,ed->bte", tok_unit, router_unit)
         bias = base_bias + gain_bias + align_bias
         gene_bias = 0.05 * (alpha_energy - alpha_fatigue).view(1, 1, E)
-        
+
         logits = logits + gene_bias + bias
-        
+
         if self.cfg.enable_metabolism:
             logits = logits + 0.1 * energy_buf.view(1, 1, E) - 0.1 * fatigue_buf.view(1, 1, E)
 
@@ -1662,12 +1662,12 @@ class SynapticMoE(nn.Module):
         out = torch.zeros_like(x)
         flat_out = out.view(-1, C)
         flat_x = x.view(-1, C)
-        
+
         use_fused_genetics = self.cfg.native_genetics and gates.is_cuda
-        
+
         me = torch.zeros(E, device=device)
         pe = torch.zeros(E, device=device)
-        
+
         for e in range(E):
             mask = idx == e
             sel = mask.any(dim=-1)
@@ -1675,14 +1675,14 @@ class SynapticMoE(nn.Module):
                 continue
             flat_idx = sel.view(-1).nonzero(as_tuple=False).squeeze(1)
             x_e = flat_x.index_select(0, flat_idx)
-            
+
             gene_e = pheno[e]
             energy_e = energy_buf[e]
-            
+
             y_e = self.experts[e](x_e, energy_override=energy_e, genes=gene_e)
             w = gates.masked_select(mask).unsqueeze(-1)
             flat_out.index_add_(0, flat_idx, w * y_e)
-            
+
             if not use_fused_genetics:
                 me[e] = sel.sum()
                 pe[e] = gates.masked_select(mask).sum()
