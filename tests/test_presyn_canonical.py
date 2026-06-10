@@ -15,6 +15,8 @@ Run:  pytest tests/test_presyn_canonical.py -v
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 
@@ -249,6 +251,50 @@ def test_neginf_drive_from_masked_topk_stays_finite():
     assert e[..., -1].abs().max() == 0, "masked (-inf) edges must release nothing"
     for k in ("C", "RRP", "PR", "CL", "E", "BUF"):
         assert_finite(state[k], f"state[{k}] (-inf drive)")
+
+
+# --------------------------------------------------------------------------- #
+# 5c. tau_c as a unified exp time-constant (8j9.2/x6z4)
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_calcium_decay_is_a_sensible_time_constant():
+    # tau_c is an exp calcium-decay time-constant; the default must give meaningful short-term
+    # memory (retention well above the ~0.31 that the legacy 0.85 would give under exp), and <1.
+    cfg = SynapticConfig()
+    retention = math.exp(-1.0 / cfg.tau_c)
+    half_life = math.log(0.5) / math.log(retention)
+    assert 0.5 < retention < 1.0, f"calcium retention {retention:.3f} should give meaningful memory"
+    assert half_life >= 2.0, f"calcium half-life {half_life:.2f} steps too short for plasticity"
+
+
+@pytest.mark.unit
+def test_legacy_release_uses_exp_tau_c_decay_not_raw():
+    # Directly verify release() decays unaccessed calcium by exp(-1/tau_c) (NOT raw tau_c). Seed
+    # a key, attend a DIFFERENT key, and the seeded key must decay by exactly rho_c.
+    cfg = SynapticConfig(enable_presyn=True)
+    pre = SynapticPresyn(16, cfg)
+    state = build_presyn_state(1, 4, 1, DEV, DT, cfg)
+    state["C"][0, 0, 0] = 2.0                                   # seed key 0
+    drive = torch.full((1, 1, 1, 1), 1.0)
+    idx = torch.full((1, 1, 1, 1), 3, dtype=torch.long)        # attend key 3, not key 0
+    pre.release(state, drive, idx, train=False)
+    expected = math.exp(-1.0 / cfg.tau_c) * 2.0                 # pure decay (key 0 not accessed)
+    assert abs(state["C"][0, 0, 0].item() - expected) < 1e-5, "release() must use exp(-1/tau_c) decay"
+
+
+@pytest.mark.unit
+def test_legacy_release_does_not_explode_at_default_tau_c():
+    # The overload fix guard: tau_c is interpreted as exp EVERYWHERE now. Were release() still
+    # treating it as a raw multiplier, the default tau_c=6.0 would give c=6*c and explode.
+    cfg = SynapticConfig(enable_presyn=True)
+    pre = SynapticPresyn(16, cfg)
+    state = build_presyn_state(1, 6, 2, DEV, DT, cfg)
+    drive = torch.full((1, 2, 3, 4), 2.0)
+    idx = torch.randint(0, 6, (1, 2, 3, 4))
+    for _ in range(20):
+        pre.release(state, drive, idx, train=False)
+    assert torch.isfinite(state["C"]).all()
+    assert state["C"].max().item() < 100.0, f"legacy calcium exploded: {state['C'].max().item():.1f}"
 
 
 # --------------------------------------------------------------------------- #

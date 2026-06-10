@@ -147,7 +147,12 @@ class SynapticConfig:
     stochastic_count_cap: int = 8
     
     # Presynaptic Biophysics
-    tau_c: float = 0.85
+    # tau_c is a calcium-decay TIME CONSTANT: retention per step is exp(-1/tau_c), used uniformly
+    # by release(), release_canonical, forward(), and the dashboard. Default 6.0 => retention
+    # exp(-1/6)=0.846, a ~4-step calcium half-life that gives meaningful short-term plasticity.
+    # (The legacy 0.85 was a RAW retention multiplier; under the unified exp form that would be a
+    # ~0.6-step half-life and near-inert plasticity. 8j9.2/x6z4; confirm final value via 4fw.)
+    tau_c: float = 6.0
     alpha_c: float = 0.55
     syt1_slope: float = 8.0
     syt7_slope: float = 3.0
@@ -326,7 +331,9 @@ class SynapticPresyn(nn.Module):
         flat_idx = idx.view(B, H, -1)
 
         c = state["C"].gather(2, flat_idx).view(B, H, T, K)
-        c = cfg.tau_c * c + cfg.alpha_c * F.softplus(drive)
+        # tau_c unified as an exp time-constant across ALL presyn paths (8j9.2/x6z4): this was a
+        # raw multiplier here, which diverged from release_canonical/forward()/dashboard.
+        c = math.exp(-1.0 / cfg.tau_c) * c + cfg.alpha_c * F.softplus(drive)
 
         sn = state["PR"].gather(2, flat_idx).view(B, H, T, K)
         clamp = state["CL"].gather(2, flat_idx).view(B, H, T, K)
@@ -419,7 +426,7 @@ class SynapticPresyn(nn.Module):
         # Update dynamics
         accessed = snu_vals > 0
         c_up = (
-            cfg.tau_c * state["C"]
+            math.exp(-1.0 / cfg.tau_c) * state["C"]  # exp time-constant (unified, 8j9.2/x6z4)
             + cfg.alpha_c * F.softplus(drv_vals) * accessed.to(dtype)
         )
         rrp_up = torch.clamp(state["RRP"] - add_vals, 0)
@@ -546,7 +553,7 @@ class SynapticPresyn(nn.Module):
         dtype = state["C"].dtype
         flat_idx = idx.reshape(B, H, -1)
 
-        rho_c = math.exp(-1.0 / cfg.tau_c)   # faithful calcium decay (vs release()'s raw tau_c)
+        rho_c = math.exp(-1.0 / cfg.tau_c)   # calcium decay time-constant (unified across paths)
         rho_b = math.exp(-1.0 / cfg.tau_buf)  # buffer decay
 
         # --- gather per-edge state for the selected keys (prior state is detached) ---

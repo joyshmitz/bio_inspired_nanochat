@@ -105,7 +105,13 @@ class ParamSpec:
 # (`SynapticPresyn.release`), so these 10 parameters are chosen to actually
 # affect model behavior in that path (vs Rust-only compat knobs).
 TOP10_PARAM_SPECS: tuple[ParamSpec, ...] = (
-    ParamSpec("tau_c", 0.85, 0.50, 0.99, False),
+    # tau_c is now an exp calcium-decay TIME CONSTANT (retention = exp(-1/tau_c)); range/default
+    # updated for that regime (8j9.2/x6z4). Was 0.85/[0.50,0.99] for the legacy raw multiplier.
+    ParamSpec("tau_c", 6.0, 2.0, 20.0, True),
+    # NOTE (or4t): alpha_c, syt1_slope, syt7_slope, cpx_thresh below are DEAD for the canonical
+    # standard path (it uses alpha_ca + Hill syt_fast_kd/syt_slow_kd + complexin_bias). They now
+    # affect only the legacy release() used by the off-by-default flex path. or4t should replace
+    # them here with the canonical's live release-probability params.
     ParamSpec("alpha_c", 0.55, 0.05, 2.00, True),
     ParamSpec("prime_rate", 0.075, 0.005, 0.30, True),
     ParamSpec("unprime_per_release", 0.05, 0.001, 0.30, True),
