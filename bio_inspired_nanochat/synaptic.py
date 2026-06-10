@@ -295,10 +295,11 @@ class SynapticPresyn(nn.Module):
         valid: Optional[Tensor] = None,
     ) -> Tensor:
         """
-        LEGACY sigmoid release (superseded by release_canonical, 8j9.2/ukxt). The live
-        attention path now calls release_canonical (faithful Hill dynamics); this body is no
-        longer on the model's forward path and is retained only for the equation contrast and
-        ablation. Slated for deletion (tracking bead). Do NOT add new callers.
+        LEGACY sigmoid release (superseded by release_canonical, 8j9.2/ukxt). The STANDARD
+        attention path now calls release_canonical (faithful Hill dynamics). This is still used
+        to advance presyn_state for the experimental FlexAttention path (which has its own
+        sigmoid bias computation in flex_synaptic.py and depends on legacy-consistent state /
+        evolving AMP) until that path is migrated. Do NOT add new callers on the standard path.
 
         Compute release and update state.
         drive: (B, H, T, K) - attention logits for top-k
@@ -1365,8 +1366,12 @@ class SynapticCausalSelfAttention(nn.Module):
             topk = min(self.cfg.attn_topk, Tk)
             vals, idx = torch.topk(dots, topk, dim=-1)
             valid = torch.isfinite(vals)
-            # 8j9.2/ukxt: canonical faithful presyn release (barrier applied below, not here).
-            _ = self.pre.release_canonical(presyn_state, vals, idx, train_mode, valid=valid)
+            # NOTE (8j9.2): the FlexAttention path computes its OWN release in flex_synaptic.py
+            # (sigmoid + AMP quantal size) and depends on release() advancing presyn_state with
+            # legacy-consistent dynamics (evolving AMP). It therefore stays on release() until
+            # the flex path is migrated to the canonical formulation (tracked follow-up). Do NOT
+            # switch this to release_canonical alone — that would freeze AMP under flex.
+            _ = self.pre.release(presyn_state, vals, idx, train_mode, valid=valid)
 
             from torch.nn.attention.flex_attention import create_block_mask
 
