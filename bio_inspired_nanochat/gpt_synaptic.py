@@ -37,6 +37,11 @@ class GPTSynapticConfig:
     n_kv_head: int = 10
     n_embd: int = 1280
     rope_base: float = 10000.0
+    # Tanh logit softcap (parity with the vanilla GPT head): bounds logits via
+    # softcap*tanh(logits/softcap). Important for the synaptic model because the
+    # synaptic attention injects an unbounded log(ε+release) bias into the logits,
+    # so without a cap logits can run away. 15.0 matches GPT; set 0 to disable.
+    logit_softcap: float = 15.0
     synapses: bool = True
     syn_cfg: SynapticConfig = field(default_factory=SynapticConfig)
     dropout: float = 0.0
@@ -272,6 +277,12 @@ class GPTSynaptic(nn.Module):
             kv_cache.presyn_state = presyn_states
 
         logits = self.lm_head(x.to(dtype=self.lm_head.weight.dtype))
+        # Logit softcap (parity with vanilla GPT) — applied on BOTH the inference
+        # return and the loss path so logits are bounded everywhere. See vg9.1.
+        sc = self.config.logit_softcap
+        if sc and sc > 0.0:
+            logits = sc * torch.tanh(logits / sc)
+        logits = logits.float()  # fp32 logits (parity with GPT)
         if targets is None:
             return logits, None
         aux = sum(
@@ -363,11 +374,13 @@ class GPTSynaptic(nn.Module):
             adam_params = embedding_params + lm_head_params + other_params
             use_fused = (not ddp) and any(p.is_cuda for p in adam_params)
             AdamWFactory = DistAdamW if ddp else partial(torch.optim.AdamW, fused=use_fused)
-            adamw_optimizer = AdamWFactory(adam_groups, **adamw_kwargs)
-            
+            # Pre-existing ty false positive: it infers the DistAdamW branch's param
+            # type for `adam_groups` even on the partial(torch.optim.AdamW) path.
+            adamw_optimizer = AdamWFactory(adam_groups, **adamw_kwargs)  # ty: ignore[invalid-argument-type]
+
             muon_kwargs = dict(lr=matrix_lr, momentum=0.95)
             MuonFactory = DistMuon if ddp else Muon
-            muon_optimizer = MuonFactory(matrix_params, **muon_kwargs)
+            muon_optimizer = MuonFactory(matrix_params, **muon_kwargs)  # ty: ignore[invalid-argument-type]
             optimizers = [adamw_optimizer, muon_optimizer]
             for opt in optimizers:
                 for group in opt.param_groups:
