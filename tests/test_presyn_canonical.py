@@ -192,6 +192,47 @@ def test_septin_barrier_respects_query_offset():
 
 
 # --------------------------------------------------------------------------- #
+# 5b. Live-path shapes: KV-cache decode (T_query != T_key) and masked (-inf) edges
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_decode_shape_query_count_differs_from_key_extent():
+    # KV-cache decode: state spans T_key keys but only T < T_key queries attend (top-k each).
+    # The LIVE standard attention path hits this during generation; gather/scatter must handle
+    # T != T_key. (None of the other tests exercise this — they use T == T_key.)
+    cfg = SynapticConfig(enable_presyn=True)
+    pre = SynapticPresyn(16, cfg)
+    B, H, Tk, Tq, K = 1, 2, 10, 3, 4
+    state = build_presyn_state(B, Tk, H, DEV, DT, cfg)
+    drive = torch.randn(B, H, Tq, K, requires_grad=True)
+    idx = torch.randint(0, Tk, (B, H, Tq, K))
+    e = pre.release_canonical(state, drive, idx, train=False)
+    assert e.shape == (B, H, Tq, K)
+    assert state["C"].shape == (B, H, Tk), "state must keep the full key extent, not shrink to T"
+    (grad,) = torch.autograd.grad(e.sum(), drive)
+    assert torch.isfinite(grad).all()
+    for k in ("C", "BUF", "RRP", "RES", "PR", "CL", "E"):
+        assert_finite(state[k], f"state[{k}] (decode)")
+
+
+@pytest.mark.unit
+def test_neginf_drive_from_masked_topk_stays_finite():
+    # Early in a sequence, top-k over masked logits can select -inf edges (valid marks them).
+    # softplus/sigmoid(-inf) = 0, so the canonical must stay finite and release nothing there.
+    cfg = SynapticConfig(enable_presyn=True)
+    pre = SynapticPresyn(16, cfg)
+    state = build_presyn_state(1, 6, 2, DEV, DT, cfg)
+    drive = torch.randn(1, 2, 3, 4)
+    drive[..., -1] = float("-inf")
+    valid = torch.isfinite(drive)
+    idx = torch.randint(0, 6, (1, 2, 3, 4))
+    e = pre.release_canonical(state, drive, idx, train=False, valid=valid)
+    assert torch.isfinite(e).all(), "canonical must not NaN on -inf drive from masked top-k"
+    assert e[..., -1].abs().max() == 0, "masked (-inf) edges must release nothing"
+    for k in ("C", "RRP", "PR", "CL", "E", "BUF"):
+        assert_finite(state[k], f"state[{k}] (-inf drive)")
+
+
+# --------------------------------------------------------------------------- #
 # 6. Determinism + stochastic path
 # --------------------------------------------------------------------------- #
 @pytest.mark.unit
