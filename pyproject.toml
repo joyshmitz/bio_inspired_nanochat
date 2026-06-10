@@ -63,6 +63,7 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "gpu: requires CUDA; auto-skipped on CPU-only hosts",
     "golden: compares against committed golden artifacts (tests/golden/)",
+    "smoke: fast in-process smoke of the flagship harnesses train/eval/tune (hm4.3); 'pytest -m smoke'",
 ]
 # --strict-markers: an unregistered @pytest.mark.* is an error, never a silent typo.
 addopts = "--strict-markers -ra"
