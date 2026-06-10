@@ -153,18 +153,17 @@ class SynapticConfig:
     # (The legacy 0.85 was a RAW retention multiplier; under the unified exp form that would be a
     # ~0.6-step half-life and near-inert plasticity. 8j9.2/x6z4; confirm final value via 4fw.)
     tau_c: float = 6.0
-    alpha_c: float = 0.55
-    syt1_slope: float = 8.0
-    syt7_slope: float = 3.0
-    cpx_thresh: float = 0.55
+    # (or4t: alpha_c / syt1_slope / syt7_slope / cpx_thresh were the LEGACY sigmoid release-prob
+    #  params; removed as dead after the canonical migration. The canonical uses alpha_ca for the
+    #  calcium influx and Hill syt_fast_kd/syt_slow_kd + complexin_bias for the release prob.)
     doc2_gain: float = 0.08
     prime_rate: float = 0.075
     unprime_per_release: float = 0.05
     nsf_recover: float = 0.08
     rec_rate: float = 0.06
     endo_delay: int = 3
-    amp_load: float = 0.02
-    amp_leak: float = 0.006
+    # (or4t: amp_load / amp_leak removed -- the canonical uses energy->qamp, not the AMP-update
+    #  dynamics. The AMP state itself is still initialized (init_amp) and carried, just frozen.)
 
     # Initial States
     init_rrp: float = 6.0

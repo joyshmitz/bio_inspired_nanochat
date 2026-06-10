@@ -105,21 +105,18 @@ class ParamSpec:
 # (`SynapticPresyn.release`), so these 10 parameters are chosen to actually
 # affect model behavior in that path (vs Rust-only compat knobs).
 TOP10_PARAM_SPECS: tuple[ParamSpec, ...] = (
-    # tau_c is now an exp calcium-decay TIME CONSTANT (retention = exp(-1/tau_c)); range/default
-    # updated for that regime (8j9.2/x6z4). Was 0.85/[0.50,0.99] for the legacy raw multiplier.
+    # The CANONICAL live presyn knobs (or4t). The legacy sigmoid release params alpha_c /
+    # syt1_slope / syt7_slope / cpx_thresh were removed; tuning them had no effect on the model.
+    # tau_c is an exp calcium-decay TIME CONSTANT (retention = exp(-1/tau_c); 8j9.2/x6z4).
     ParamSpec("tau_c", 6.0, 2.0, 20.0, True),
-    # NOTE (or4t): alpha_c, syt1_slope, syt7_slope, cpx_thresh below are DEAD for the canonical
-    # standard path (it uses alpha_ca + Hill syt_fast_kd/syt_slow_kd + complexin_bias). They now
-    # affect only the legacy release() used by the off-by-default flex path. or4t should replace
-    # them here with the canonical's live release-probability params.
-    ParamSpec("alpha_c", 0.55, 0.05, 2.00, True),
+    ParamSpec("alpha_ca", 0.55, 0.05, 2.00, True),       # calcium influx gain
+    ParamSpec("syt_fast_kd", 0.4, 0.10, 2.00, True),     # Syt1 (fast) Hill Kd
+    ParamSpec("syt_slow_kd", 1.0, 0.20, 5.00, True),     # Syt7 (slow) Hill Kd
+    ParamSpec("doc2_gain", 0.08, 0.00, 0.50, False),     # Doc2 facilitation gain
+    ParamSpec("complexin_bias", 0.0, 0.00, 2.00, False),  # complexin inhibitory bias
     ParamSpec("prime_rate", 0.075, 0.005, 0.30, True),
     ParamSpec("unprime_per_release", 0.05, 0.001, 0.30, True),
     ParamSpec("nsf_recover", 0.08, 0.001, 0.30, True),
-    ParamSpec("syt1_slope", 8.0, 0.50, 20.0, True),
-    ParamSpec("syt7_slope", 3.0, 0.50, 20.0, True),
-    ParamSpec("cpx_thresh", 0.55, 0.05, 1.20, False),
-    ParamSpec("complexin_bias", 0.0, 0.00, 2.00, False),
     ParamSpec("lambda_loge", 1.0, 0.00, 5.00, False),
 )
 

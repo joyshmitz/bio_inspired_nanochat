@@ -64,20 +64,6 @@ def test_flex_no_longer_reads_amp():
 
 
 @pytest.mark.unit
-def test_flex_does_not_use_dead_setA_params():
-    # The legacy sigmoid mix read syt1_slope/syt7_slope/cpx_thresh; the canonical does not.
-    set_seed(0)
-    cfg = SynapticConfig(enable_presyn=True)
-    flex = SynapticFlexAttention(cfg)
-    state = build_presyn_state(1, 4, 2, DEV, DT, cfg)
-    kf0, _ = flex.precompute_bio_factors(state, cfg)
-    for dead in ("syt1_slope", "syt7_slope", "cpx_thresh"):
-        cfg2 = SynapticConfig(enable_presyn=True, **{dead: getattr(cfg, dead) * 3 + 1})
-        kf1, _ = flex.precompute_bio_factors(state, cfg2)
-        assert torch.equal(kf0, kf1), f"flex must not read the dead Set-A param {dead}"
-
-
-@pytest.mark.unit
 def test_flex_forward_runs_finite_if_available():
     # Best-effort end-to-end smoke; flex_attention may require compilation/hardware not present.
     cfg = SynapticConfig(enable_presyn=True)
