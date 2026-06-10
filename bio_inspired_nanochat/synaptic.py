@@ -178,6 +178,11 @@ class SynapticConfig:
     lambda_loge: float = 1.0
     barrier_strength: float = 0.1
     epsilon: float = 1e-6
+    # Max absolute value of the per-edge log-release attention bias
+    # (lambda_loge * log(epsilon + release)). The normalized release can spike, so
+    # without a clamp a single edge's bias can dominate the softmax and destabilize
+    # attention. 10.0 keeps the mechanism intact while bounding it; 0 disables (vg9.5).
+    loge_bias_clamp: float = 10.0
     
     # Rust Kernel Compat
     tau_buf: float = 4.0
@@ -1142,6 +1147,11 @@ class SynapticCausalSelfAttention(nn.Module):
         # Scatter biological log-bias back into the logits, preserving masking.
         aug = torch.zeros_like(dots)
         src_val = self.cfg.lambda_loge * torch.log(self.cfg.epsilon + e).to(aug.dtype)
+        # Clamp the log-release bias to a finite range so no single edge can dominate
+        # the softmax when the normalized release spikes (numerical hardening, vg9.5).
+        clamp = self.cfg.loge_bias_clamp
+        if clamp and clamp > 0.0:
+            src_val = src_val.clamp(-clamp, clamp)
         src_val = src_val * valid.to(src_val.dtype)
         aug.scatter_add_(-1, idx, src_val)
 
