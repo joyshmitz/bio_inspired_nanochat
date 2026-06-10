@@ -41,6 +41,7 @@ from bio_inspired_nanochat.gpt import GPT, GPTConfig
 from bio_inspired_nanochat.loss_eval import evaluate_bpb
 from bio_inspired_nanochat.report import get_report
 from bio_inspired_nanochat.tokenizer import get_token_bytes, get_tokenizer
+from bio_inspired_nanochat.divergence_guard import GuardAction, build_divergence_guard
 from bio_inspired_nanochat.torch_imports import F, torch
 from scripts.base_eval import evaluate_model
 
@@ -410,6 +411,13 @@ else:
 # Only used for end-of-run reporting; will be overwritten inside the loop.
 mfu: float = 0.0
 
+# vg9.7: training-loop divergence guard. Detects NaN/Inf and runaway dynamics on the loss and
+# the bio buffers (CaMKII/BDNF/calcium/fast weights) and applies a configurable response
+# (default: skip the bad step on NaN/Inf, back off the LR on a loss spike). Logs bio-buffer
+# norms each step for early warning. Especially important with the stateful, positive-feedback
+# bio mechanisms now live on the forward path.
+divguard = build_divergence_guard()
+
 # -----------------------------------------------------------------------------
 # Training loop
 while True:
@@ -570,6 +578,12 @@ while True:
         x, y, dataloader_state_dict = next(
             train_loader
         )  # prefetch the next batch while the GPU is busy with forward/backward
+    # vg9.7: divergence guard — inspect the loss + bio buffers before applying the gradient.
+    _guard = divguard.check(train_loss, orig_model, step=step)
+    divguard.log(_guard, step)
+    skip_optimizer_step = _guard.action in (GuardAction.SKIP, GuardAction.ROLLBACK)
+    if _guard.action == GuardAction.ROLLBACK and divguard.can_rollback():
+        divguard.rollback(orig_model, optimizers)
     # gradient clipping
     grad_clip_enabled = grad_clip > 0.0
     if grad_clip_enabled:
@@ -581,6 +595,8 @@ while True:
         )  # GPU tensor -> CPU float (note: cpu-gpu sync point)
     # step the optimizers
     lrm = get_lr_multiplier(step)
+    if _guard.action == GuardAction.BACKOFF:
+        lrm = lrm * divguard.cfg.backoff_factor  # vg9.7: gentler step on a loss spike
     for opt in optimizers:
         for group in opt.param_groups:
             group["lr"] = group["initial_lr"] * lrm
@@ -588,8 +604,10 @@ while True:
         muon_momentum = get_muon_momentum(step)
         for group in muon_optimizer.param_groups:
             group["momentum"] = muon_momentum
-    for opt in optimizers:
-        opt.step()
+    if not skip_optimizer_step:
+        for opt in optimizers:
+            opt.step()
+        divguard.maybe_snapshot(orig_model, optimizers, step)  # vg9.7: refresh last-good (opt-in)
     model.zero_grad(set_to_none=True)
 
     # Split/merge controller step
