@@ -170,6 +170,24 @@ def test_septin_barrier_penalizes_distant_edges():
     assert near > far, "septin barrier must penalize the longer-range edge"
 
 
+@pytest.mark.unit
+def test_septin_barrier_respects_query_offset():
+    # q_pos lets the live path supply absolute query positions (KV-cache prefix decoding).
+    # Shifting queries 10 positions away from key 0 must strengthen the barrier -> less release.
+    cfg = SynapticConfig(enable_presyn=True, barrier_strength=0.5, stochastic_train_frac=0.0)
+    B, H, T = 1, 1, 4
+    drive = torch.full((B, H, T, 1), 2.0)
+    idx = torch.zeros(B, H, T, 1, dtype=torch.long)  # every query attends key 0
+
+    pre_a = SynapticPresyn(16, cfg)
+    e_default = pre_a.release_canonical(build_presyn_state(B, T, H, DEV, DT, cfg), drive, idx, train=False)
+    pre_b = SynapticPresyn(16, cfg)
+    e_offset = pre_b.release_canonical(
+        build_presyn_state(B, T, H, DEV, DT, cfg), drive, idx, train=False, q_pos=torch.arange(T) + 10
+    )
+    assert (e_offset < e_default).all(), "larger query offset must increase the septin penalty"
+
+
 # --------------------------------------------------------------------------- #
 # 6. Determinism + stochastic path
 # --------------------------------------------------------------------------- #

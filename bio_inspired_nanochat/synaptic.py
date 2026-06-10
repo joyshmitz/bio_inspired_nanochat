@@ -504,6 +504,7 @@ class SynapticPresyn(nn.Module):
         idx: Tensor,
         train: bool,
         valid: Optional[Tensor] = None,
+        q_pos: Optional[Tensor] = None,
     ) -> Tensor:
         """CANONICAL unified presynaptic release — the single, faithful, differentiable
         source of truth (8j9.2).
@@ -520,6 +521,9 @@ class SynapticPresyn(nn.Module):
         faithful amplitude); the vestigial AMP dynamics are removed in the param-unify step.
 
         drive: (B,H,T,K) top-k attention logits; idx: (B,H,T,K) selected key indices.
+        q_pos: optional (T,) absolute query positions for the septin distance barrier; defaults
+        to arange(T) (correct for full-sequence). The live path (ukxt) must pass absolute
+        positions when decoding with a KV-cache prefix, where queries are the LAST Tq positions.
         Returns per-edge release e (B,H,T,K) consumed as lambda_loge*log(eps+e).
         """
         if not self.cfg.enable_presyn:
@@ -584,8 +588,14 @@ class SynapticPresyn(nn.Module):
         qamp = torch.sigmoid(cfg.q_beta * (e_energy - 0.5)) * cfg.qmax
 
         # --- septin distance barrier: penalize long-range edges using real key positions ---
-        qpos = torch.arange(T, device=drive.device, dtype=torch.float32).view(1, 1, T, 1)
-        dist = (qpos - idx.to(torch.float32)).abs() / float(max(1, T))
+        # Normalize by the full key extent (T_key), not the query count, so the penalty is
+        # correct under KV-cache prefix decoding (where T queries != T_key keys).
+        t_key = state["C"].shape[2]
+        if q_pos is None:
+            qpos = torch.arange(T, device=drive.device, dtype=torch.float32)
+        else:
+            qpos = q_pos.to(device=drive.device, dtype=torch.float32)
+        dist = (qpos.reshape(1, 1, T, 1) - idx.to(torch.float32)).abs() / float(max(1, t_key))
         barrier = torch.exp(-cfg.barrier_strength * dist).to(rel.dtype)
 
         e = rel * qamp * barrier
