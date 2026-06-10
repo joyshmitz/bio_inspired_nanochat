@@ -68,19 +68,20 @@ def test_traces_and_camkii_change_during_training_forward():
 @pytest.mark.unit
 def test_weight_writes_are_deferred_then_applied_next_forward():
     lin = _make_lin().train()
-    x = torch.randn(B, IN)
     ca, en = _signals()
     w_slow0 = lin.w_slow.detach().clone()
     fast0 = lin.post.fast.detach().clone()
 
     # Step 1 (training): weight writes are DEFERRED -> w_slow unchanged, pending flagged.
-    lin(x, ca, en)
+    # Backward immediately after each forward (the real base_train pattern) so the deferred
+    # write at step 2's top lands only AFTER step 1's backward — exercising the safe timing.
+    lin(torch.randn(B, IN, requires_grad=True), ca, en).float().sum().backward()
     assert lin._plasticity_pending is True, "training step must flag a deferred write"
     assert torch.equal(lin.w_slow, w_slow0), "Parameter write must be deferred, not applied now"
     assert torch.equal(lin.post.fast, fast0), "post.fast write must be deferred too"
 
     # Step 2: the deferred write is flushed at the TOP, before the matmuls -> weights changed.
-    lin(x, ca, en)
+    lin(torch.randn(B, IN, requires_grad=True), ca, en).float().sum().backward()
     assert (lin.w_slow - w_slow0).abs().sum() > 0, "deferred Hebbian write must land next forward"
     assert (lin.post.fast - fast0).abs().sum() > 0, "deferred post.fast write must land too"
 
@@ -124,11 +125,11 @@ def test_grads_flow_to_slow_weights():
 @pytest.mark.unit
 def test_no_double_counting_deferred_write_applied_once():
     lin = _make_lin().train()
-    x = torch.randn(B, IN)
     ca, en = _signals()
 
-    # After step 1: traces set, write deferred (0 applications).
-    lin(x, ca, en)
+    # After step 1: traces set, write deferred (0 applications). Backward between forwards
+    # mirrors the real training loop and keeps the deferred-flush timing safe.
+    lin(torch.randn(B, IN, requires_grad=True), ca, en).float().sum().backward()
     w_before_flush = lin.w_slow.detach().clone()
     traces = (lin.u_buf @ lin.v_buf).clone()
     gate = lin._last_gate_scale
@@ -136,7 +137,7 @@ def test_no_double_counting_deferred_write_applied_once():
     expected_delta = lin.cfg.post_slow_lr * gscale * traces  # exactly ONE application
 
     # Step 2 flushes the single deferred write at the top, then updates traces again.
-    lin(x, ca, en)
+    lin(torch.randn(B, IN, requires_grad=True), ca, en).float().sum().backward()
     applied = lin.w_slow.detach() - w_before_flush
     assert torch.allclose(applied, expected_delta, atol=1e-6), "write must be applied exactly once"
 
