@@ -107,20 +107,13 @@ def test_state_updates_finite_and_calcium_rises():
 
 
 @pytest.mark.unit
-def test_buffer_ode_becomes_active_unlike_release():
-    # release() carries BUF unchanged (it's ignored); the canonical drives it via the calcium
-    # buffer ODE. BUF is calcium-driven, so it activates on the SECOND step (after C rises).
+def test_buffer_ode_is_active():
+    # The canonical drives the calcium BUFFER ODE; BUF is calcium-driven, so it activates on the
+    # SECOND step (after C rises). The legacy release() ignored BUF entirely -- the gap this closed.
     cfg, pre, state, drive, idx = _setup()
     pre.release_canonical(state, drive, idx, train=False)  # step 1: C rises, BUF still ~0
     pre.release_canonical(state, drive, idx, train=False)  # step 2: BUF driven by C
     assert state["BUF"].abs().sum() > 0, "calcium BUFFER ODE must be active in the canonical fn"
-
-    # Contrast: release() leaves BUF untouched.
-    _, pre2, state2, drive2, idx2 = _setup()
-    buf0 = state2["BUF"].clone()
-    pre2.release(state2, drive2, idx2, train=False)
-    pre2.release(state2, drive2, idx2, train=False)
-    assert torch.equal(state2["BUF"], buf0), "release() must leave BUF unused (the gap we close)"
 
 
 # --------------------------------------------------------------------------- #
@@ -268,33 +261,34 @@ def test_calcium_decay_is_a_sensible_time_constant():
 
 
 @pytest.mark.unit
-def test_legacy_release_uses_exp_tau_c_decay_not_raw():
-    # Directly verify release() decays unaccessed calcium by exp(-1/tau_c) (NOT raw tau_c). Seed
-    # a key, attend a DIFFERENT key, and the seeded key must decay by exactly rho_c.
+def test_canonical_calcium_decays_by_exp_tau_c():
+    # The canonical decays unaccessed calcium by exp(-1/tau_c) MINUS the buffer absorption term
+    # (NOT a raw tau_c multiplier). Seed a key, attend a DIFFERENT key (buf starts at 0).
     cfg = SynapticConfig(enable_presyn=True)
     pre = SynapticPresyn(16, cfg)
     state = build_presyn_state(1, 4, 1, DEV, DT, cfg)
     state["C"][0, 0, 0] = 2.0                                   # seed key 0
     drive = torch.full((1, 1, 1, 1), 1.0)
     idx = torch.full((1, 1, 1, 1), 3, dtype=torch.long)        # attend key 3, not key 0
-    pre.release(state, drive, idx, train=False)
-    expected = math.exp(-1.0 / cfg.tau_c) * 2.0                 # pure decay (key 0 not accessed)
-    assert abs(state["C"][0, 0, 0].item() - expected) < 1e-5, "release() must use exp(-1/tau_c) decay"
+    pre.release_canonical(state, drive, idx, train=False)
+    # unaccessed key with buf=0: c' = (exp(-1/tau_c) - alpha_buf_on) * c  (buffer absorbs some Ca)
+    expected = (math.exp(-1.0 / cfg.tau_c) - cfg.alpha_buf_on) * 2.0
+    assert abs(state["C"][0, 0, 0].item() - expected) < 1e-5, "canonical must use exp(-1/tau_c) decay"
 
 
 @pytest.mark.unit
-def test_legacy_release_does_not_explode_at_default_tau_c():
-    # The overload fix guard: tau_c is interpreted as exp EVERYWHERE now. Were release() still
-    # treating it as a raw multiplier, the default tau_c=6.0 would give c=6*c and explode.
+def test_canonical_calcium_does_not_explode_at_default_tau_c():
+    # tau_c is interpreted as exp everywhere; the default tau_c=6.0 must NOT blow calcium up
+    # (a raw-multiplier interpretation would give c=6*c and explode).
     cfg = SynapticConfig(enable_presyn=True)
     pre = SynapticPresyn(16, cfg)
     state = build_presyn_state(1, 6, 2, DEV, DT, cfg)
     drive = torch.full((1, 2, 3, 4), 2.0)
     idx = torch.randint(0, 6, (1, 2, 3, 4))
     for _ in range(20):
-        pre.release(state, drive, idx, train=False)
+        pre.release_canonical(state, drive, idx, train=False)
     assert torch.isfinite(state["C"]).all()
-    assert state["C"].max().item() < 100.0, f"legacy calcium exploded: {state['C'].max().item():.1f}"
+    assert state["C"].max().item() < 100.0, f"calcium exploded: {state['C'].max().item():.1f}"
 
 
 # --------------------------------------------------------------------------- #

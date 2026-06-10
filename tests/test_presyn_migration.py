@@ -23,27 +23,22 @@ from _bio_testkit import make_tiny_synaptic, random_tokens
 
 
 @pytest.mark.unit
-def test_live_attention_calls_canonical_not_legacy(monkeypatch):
-    calls = {"canonical": 0, "legacy": 0}
+def test_live_attention_calls_canonical(monkeypatch):
+    # The legacy sigmoid release() was deleted (qcj7); release_canonical is the only release fn.
+    assert not hasattr(SynapticPresyn, "release"), "the legacy release() must be gone (qcj7)"
+    calls = {"canonical": 0}
     orig_canon = SynapticPresyn.release_canonical
-    orig_legacy = SynapticPresyn.release
 
     def spy_canon(self, *a, **k):
         calls["canonical"] += 1
         return orig_canon(self, *a, **k)
 
-    def spy_legacy(self, *a, **k):
-        calls["legacy"] += 1
-        return orig_legacy(self, *a, **k)
-
     monkeypatch.setattr(SynapticPresyn, "release_canonical", spy_canon)
-    monkeypatch.setattr(SynapticPresyn, "release", spy_legacy)
 
     m = make_tiny_synaptic(seed=0, train=True).train()
     m(random_tokens(2, 16, vocab=m.config.vocab_size))
 
-    assert calls["canonical"] > 0, "live attention must call release_canonical (the migration)"
-    assert calls["legacy"] == 0, "live attention must NOT call the legacy sigmoid release()"
+    assert calls["canonical"] > 0, "live attention must call release_canonical"
 
 
 @pytest.mark.unit

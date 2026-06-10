@@ -256,16 +256,6 @@ if __name__ == "__main__":
         print("rustbpe not installed, skipping tests")
 
 
-def test_presyn_mix_prob_respects_clamp():
-    cfg = SynapticConfig()
-    pre = SynapticPresyn(d_head=16, cfg=cfg)
-    c = torch.tensor([0.9])
-    sn = torch.tensor([1.0])
-    p_low = pre._mix_prob(c, clamp=torch.tensor([0.0]), sn=sn)
-    p_high = pre._mix_prob(c, clamp=torch.tensor([1.0]), sn=sn)
-    assert torch.all(p_low > p_high)
-
-
 def test_stochastic_binomial_counts_matches_moments():
     from bio_inspired_nanochat.synaptic import _sample_binomial_counts
 
@@ -310,8 +300,8 @@ def test_presyn_release_is_deterministic_when_stochastic_train_frac_is_zero():
     state_train = build_presyn_state(B, Tk, H, drive.device, drive.dtype, cfg)
     state_eval = build_presyn_state(B, Tk, H, drive.device, drive.dtype, cfg)
 
-    e_train = pre_train.release(state_train, drive, idx, train=True)
-    e_eval = pre_eval.release(state_eval, drive, idx, train=False)
+    e_train = pre_train.release_canonical(state_train, drive, idx, train=True)
+    e_eval = pre_eval.release_canonical(state_eval, drive, idx, train=False)
 
     torch.testing.assert_close(e_train, e_eval, rtol=1e-6, atol=1e-6)
     for key in ["C", "BUF", "RRP", "RES", "PR", "CL", "E", "AMP"]:
