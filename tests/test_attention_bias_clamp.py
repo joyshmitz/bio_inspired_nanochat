@@ -35,7 +35,8 @@ def _build(clamp: float, **syn) -> GPTSynaptic:
 
 
 def _huge_release(self, state, drive, idx, train, valid=None):
-    """Drop-in for SynapticPresyn.release that returns an enormous release everywhere,
+    """Drop-in for SynapticPresyn.release_canonical (the live attention entry point) that
+    returns an enormous release everywhere,
     which would make the RAW log-bias ~log(1e6)=13.8 — well past a clamp of 0.5/10."""
     return torch.full_like(drive, 1e6)
 
@@ -65,7 +66,7 @@ def test_clamp_zero_leaves_formula_unbounded():
 
 @pytest.mark.unit
 def test_model_forward_finite_under_extreme_release(monkeypatch):
-    monkeypatch.setattr(SynapticPresyn, "release", _huge_release)
+    monkeypatch.setattr(SynapticPresyn, "release_canonical", _huge_release)
     m = _build(clamp=10.0)
     logits, _ = m(random_tokens(2, 16))
     assert_finite(logits, "logits under extreme injected release")
@@ -77,7 +78,7 @@ def test_model_forward_finite_under_extreme_release(monkeypatch):
 def test_clamp_is_wired_into_attention(monkeypatch):
     # Same weights/input/(injected) release, different clamp -> the bias on the top-k
     # edges differs (0.5 vs 10) while non-top-k edges stay 0, so attention differs.
-    monkeypatch.setattr(SynapticPresyn, "release", _huge_release)
+    monkeypatch.setattr(SynapticPresyn, "release_canonical", _huge_release)
     x = random_tokens(2, 16)
     tight, _ = _build(clamp=0.5)(x)
     loose, _ = _build(clamp=10.0)(x)

@@ -165,7 +165,7 @@ def test_septin_barrier_penalizes_distant_edges():
     idx = torch.zeros(B, H, T, 2, dtype=torch.long)
     idx[..., 0] = T - 1            # near key (same as the last query)
     idx[..., 1] = 0                # far key
-    e = pre.release_canonical(state, drive, idx, train=False)
+    e = pre.release_canonical(state, drive, idx, train=False, apply_barrier=True)
     near, far = e[0, 0, T - 1, 0], e[0, 0, T - 1, 1]
     assert near > far, "septin barrier must penalize the longer-range edge"
 
@@ -180,10 +180,13 @@ def test_septin_barrier_respects_query_offset():
     idx = torch.zeros(B, H, T, 1, dtype=torch.long)  # every query attends key 0
 
     pre_a = SynapticPresyn(16, cfg)
-    e_default = pre_a.release_canonical(build_presyn_state(B, T, H, DEV, DT, cfg), drive, idx, train=False)
+    e_default = pre_a.release_canonical(
+        build_presyn_state(B, T, H, DEV, DT, cfg), drive, idx, train=False, apply_barrier=True
+    )
     pre_b = SynapticPresyn(16, cfg)
     e_offset = pre_b.release_canonical(
-        build_presyn_state(B, T, H, DEV, DT, cfg), drive, idx, train=False, q_pos=torch.arange(T) + 10
+        build_presyn_state(B, T, H, DEV, DT, cfg), drive, idx, train=False,
+        q_pos=torch.arange(T) + 10, apply_barrier=True,
     )
     assert (e_offset < e_default).all(), "larger query offset must increase the septin penalty"
 

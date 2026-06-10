@@ -295,6 +295,11 @@ class SynapticPresyn(nn.Module):
         valid: Optional[Tensor] = None,
     ) -> Tensor:
         """
+        LEGACY sigmoid release (superseded by release_canonical, 8j9.2/ukxt). The live
+        attention path now calls release_canonical (faithful Hill dynamics); this body is no
+        longer on the model's forward path and is retained only for the equation contrast and
+        ablation. Slated for deletion (tracking bead). Do NOT add new callers.
+
         Compute release and update state.
         drive: (B, H, T, K) - attention logits for top-k
         idx: (B, H, T, K) - indices of top-k keys
@@ -505,6 +510,7 @@ class SynapticPresyn(nn.Module):
         train: bool,
         valid: Optional[Tensor] = None,
         q_pos: Optional[Tensor] = None,
+        apply_barrier: bool = False,
     ) -> Tensor:
         """CANONICAL unified presynaptic release — the single, faithful, differentiable
         source of truth (8j9.2).
@@ -521,10 +527,11 @@ class SynapticPresyn(nn.Module):
         faithful amplitude); the vestigial AMP dynamics are removed in the param-unify step.
 
         drive: (B,H,T,K) top-k attention logits; idx: (B,H,T,K) selected key indices.
-        q_pos: optional (T,) absolute query positions for the septin distance barrier; defaults
-        to arange(T) (correct for full-sequence). The live path (ukxt) must pass absolute
-        positions when decoding with a KV-cache prefix, where queries are the LAST Tq positions.
-        Returns per-edge release e (B,H,T,K) consumed as lambda_loge*log(eps+e).
+        apply_barrier: fold the septin distance barrier into e (default False; the live attention
+        path applies its own exact logit-level barrier, so it must stay False there to avoid
+        double-counting). q_pos: optional (T,) absolute query positions for that barrier; defaults
+        to arange(T) (full-sequence). Returns per-edge release e (B,H,T,K) consumed as
+        lambda_loge*log(eps+e).
         """
         if not self.cfg.enable_presyn:
             return torch.ones_like(drive)
@@ -587,18 +594,21 @@ class SynapticPresyn(nn.Module):
         # --- energy-derived AMPA amplitude (faithful) ---
         qamp = torch.sigmoid(cfg.q_beta * (e_energy - 0.5)) * cfg.qmax
 
-        # --- septin distance barrier: penalize long-range edges using real key positions ---
-        # Normalize by the full key extent (T_key), not the query count, so the penalty is
-        # correct under KV-cache prefix decoding (where T queries != T_key keys).
-        t_key = state["C"].shape[2]
-        if q_pos is None:
-            qpos = torch.arange(T, device=drive.device, dtype=torch.float32)
-        else:
-            qpos = q_pos.to(device=drive.device, dtype=torch.float32)
-        dist = (qpos.reshape(1, 1, T, 1) - idx.to(torch.float32)).abs() / float(max(1, t_key))
-        barrier = torch.exp(-cfg.barrier_strength * dist).to(rel.dtype)
+        e = rel * qamp
 
-        e = rel * qamp * barrier
+        # --- optional septin distance barrier (opt-in). The LIVE attention path applies its own
+        # exact logit-level barrier with global query/key positions (and the correct prefix
+        # offset), so it leaves apply_barrier=False here to avoid DOUBLE-counting. Standalone /
+        # golden use (where there is no outer barrier) can set apply_barrier=True for a
+        # self-contained faithful output. Normalize distance by the full key extent (T_key). ---
+        if apply_barrier and cfg.barrier_strength > 0.0:
+            t_key = state["C"].shape[2]
+            if q_pos is None:
+                qpos = torch.arange(T, device=drive.device, dtype=torch.float32)
+            else:
+                qpos = q_pos.to(device=drive.device, dtype=torch.float32)
+            dist = (qpos.reshape(1, 1, T, 1) - idx.to(torch.float32)).abs() / float(max(1, t_key))
+            e = e * torch.exp(-cfg.barrier_strength * dist).to(e.dtype)
 
         # === scatter faithful state updates back to key positions (recurrence DETACHED) ===
         with torch.no_grad():
@@ -1355,7 +1365,8 @@ class SynapticCausalSelfAttention(nn.Module):
             topk = min(self.cfg.attn_topk, Tk)
             vals, idx = torch.topk(dots, topk, dim=-1)
             valid = torch.isfinite(vals)
-            _ = self.pre.release(presyn_state, vals, idx, train_mode, valid=valid)
+            # 8j9.2/ukxt: canonical faithful presyn release (barrier applied below, not here).
+            _ = self.pre.release_canonical(presyn_state, vals, idx, train_mode, valid=valid)
 
             from torch.nn.attention.flex_attention import create_block_mask
 
@@ -1379,8 +1390,9 @@ class SynapticCausalSelfAttention(nn.Module):
         vals, idx = torch.topk(dots, topk, dim=-1)
         valid = torch.isfinite(vals)
 
-        # Run presynaptic physics on only the valid edges.
-        e = self.pre.release(presyn_state, vals, idx, train_mode, valid=valid)
+        # Run presynaptic physics on only the valid edges (8j9.2/ukxt: canonical faithful
+        # release; the septin barrier is applied at the logit level below, not folded into e).
+        e = self.pre.release_canonical(presyn_state, vals, idx, train_mode, valid=valid)
 
         # Scatter biological log-bias back into the logits, preserving masking.
         aug = torch.zeros_like(dots)

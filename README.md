@@ -151,26 +151,32 @@ See [NEW_RADICALLY_NEW_BIO_INSPIRED_FEATURES_TO_ADD_IN_MODULAR_WAY.md](NEW_RADIC
 
 For the researchers, here are the governing equations implemented in `synaptic.py` and `neuroscore.py`.
 
-### 1. Calcium Dynamics (The Integrator)
-Calcium $C$ acts as a leaky integrator of the incoming attention signal (Logits $L$). It represents the "excitement" of the synapse.
+> **These are the *live* equations.** As of the presyn unification (`8j9.2`), the model's
+> attention path runs `SynapticPresyn.release_canonical`, which implements exactly the faithful
+> dynamics below — closing the long-standing gap where these equations were documented but the
+> live code used a cheaper sigmoid approximation.
 
-$$ C_{t} = \alpha_{ca} \cdot \text{softplus}(L_t) + (1 - 1/\tau_c) \cdot C_{t-1} $$
+### 1. Calcium Dynamics (The Integrator)
+Calcium $C$ acts as a leaky integrator of the incoming attention signal (Logits $L$), coupled to a fast calcium **buffer** $B$ (a parvalbumin/calbindin analog that absorbs and re-releases calcium).
+
+$$ C_{t} = e^{-1/\tau_c} \cdot C_{t-1} + \alpha_{ca} \cdot \text{softplus}(L_t) - \alpha_{on} C_{t-1}(1 - B_{t-1}) + \alpha_{off} B_{t-1} $$
+$$ B_{t} = e^{-1/\tau_b} \cdot B_{t-1} + \alpha_{on} C_{t-1}(1 - B_{t-1}) - \alpha_{off} B_{t-1} $$
 
 ### 2. The Release Probability (The Gate)
 The probability $P_{release}$ that a vesicle is actually released depends on the Calcium level (detected by Synaptotagmin) versus the clamp (Complexin).
 
 $$ P_{release} = \sigma(3 \cdot \text{Syt}(C) + 2 \cdot P_{primed} - 2 \cdot \text{Complexin}) \cdot \sigma(\text{Logits}) $$
 
-Where $\text{Syt}(C)$ is a Hill equation modeling the calcium sensor's sensitivity:
-$$ \text{Syt}(C) = \frac{C}{C + K_d} $$
+Where $\text{Syt}(C)$ is a Hill equation modeling the calcium sensor's sensitivity (Syt1 fast + Syt7 slow, plus a Doc2 facilitation term):
+$$ \text{Syt}(C) = 0.7\frac{C}{C + K_{d,\text{fast}}} + 0.3\frac{C}{C + K_{d,\text{slow}}} + g_{\text{doc2}}\,\sigma(4(C - 0.12)) $$
 
-### 3. Vesicle Depletion (The Limiter)
-The actual synaptic weight $W_{eff}$ is limited by the available vesicles in the Readily Releasable Pool ($RRP$).
+### 3. Vesicle Release & Depletion (The Limiter)
+The released amount is the release probability scaled by the available vesicles in the Readily Releasable Pool ($RRP$). Since $P_{release}\in[0,1]$, this is bounded by the pool ($R_t \le RRP_t$) — the faithful reading of $W_{eff}=\min(P,RRP)$.
 
-$$ W_{eff} = \min(P_{release}, RRP_t) $$
-$$ RRP_{t+1} = RRP_t - W_{eff} + \text{RefillRate} $$
+$$ R_t = P_{release} \cdot RRP_t $$
+$$ RRP_{t+1} = RRP_t - R_t + \text{RefillRate} $$
 
-This non-linear clamping is what physically enforces the frequency penalty.
+The released signal is then scaled by an energy-gated AMPA amplitude $q = \sigma(\beta_q (E - 0.5)) \cdot q_{max}$ and biased by a septin-like distance barrier. This non-linear depletion is what physically enforces the frequency penalty.
 
 ### 4. Hebbian Learning (The Fast Weight)
 The postsynaptic weight update follows a gated Hebbian rule. We maintain low-rank eligibility traces $U, V$.
