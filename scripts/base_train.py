@@ -705,6 +705,32 @@ get_report().log(
     ],
 )
 
+# hm4.1: emit a provenance-stamped, schema-valid run record to the committed results registry
+# (rank 0 only; non-fatal so a bad record can never break the run's cleanup).
+if ddp_rank == 0:
+    try:
+        from bio_inspired_nanochat.results_registry import append_record, make_record
+
+        _rec = make_record(
+            "train",
+            {
+                "val_bpb": float(val_bpb),
+                "smooth_train_loss": float(smooth_train_loss),
+                "mfu": float(mfu),
+                "total_training_time": float(total_training_time),
+                "step": float(step),
+            },
+            run_id=f"train-{int(time.time())}",
+            syn_cfg=syn_cfg if use_syn else None,
+            seed=int(init_seed),
+            timestamp=time.time(),
+            notes="base_train",
+        )
+        append_record(_rec)
+        print0(f"[results] appended run record {_rec.run_id} to the registry")
+    except Exception as exc:  # pragma: no cover - depends on a full training run
+        print0(f"[results] failed to record run (non-fatal): {exc}")
+
 # cleanup
 if viz is not None:
     viz.close()

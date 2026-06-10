@@ -1,0 +1,168 @@
+"""
+Committed results corpus + experiment registry — bead hm4.1.
+
+A tracked, schema'd results store so findings accumulate and every claim is verifiable. Every
+run (train / eval / tune) emits a provenance-stamped, schema-valid `RunRecord` appended to a
+committed JSONL registry; a query CLI summarizes past runs.
+
+Provenance reuses checkpoint_manager (git SHA + config hash); metrics are validated against the
+canonical schema (metrics_schema / hm4.2). The registry is the audit trail the project was
+missing (empty anomaly index, placeholder artifacts, no runs/ dir).
+
+CLI:
+    python -m bio_inspired_nanochat.results_registry list [--harness train] [--limit 20]
+    python -m bio_inspired_nanochat.results_registry best --metric val_bpb
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import platform
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Mapping, Optional
+
+from bio_inspired_nanochat.checkpoint_manager import _git_sha, config_hash
+from bio_inspired_nanochat.metrics_schema import Direction, get_metric, validate_metrics
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_REGISTRY = os.path.join("runs", "registry.jsonl")
+_HARNESSES = ("train", "eval", "tune")
+
+
+@dataclass
+class RunRecord:
+    run_id: str
+    harness: str
+    metrics: Dict[str, float]
+    git_sha: Optional[str] = None
+    config_hash: Optional[str] = None
+    seed: Optional[int] = None
+    hardware: Optional[str] = None
+    dataset_shards: List[str] = field(default_factory=list)
+    timestamp: Optional[float] = None
+    notes: str = ""
+
+    def to_json(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_json(cls, d: Mapping[str, Any]) -> "RunRecord":
+        known = set(cls.__dataclass_fields__)
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+
+def _hardware_string() -> str:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return f"cuda:{torch.cuda.get_device_name(0)} x{torch.cuda.device_count()}"
+    except Exception:
+        pass
+    return f"cpu:{platform.machine()}"
+
+
+def make_record(
+    harness: str,
+    metrics: Mapping[str, Any],
+    *,
+    run_id: str,
+    syn_cfg: Any = None,
+    seed: Optional[int] = None,
+    dataset_shards: Optional[List[str]] = None,
+    timestamp: Optional[float] = None,
+    notes: str = "",
+) -> RunRecord:
+    """Build a provenance-stamped, schema-valid RunRecord.
+
+    Metrics are validated against the canonical schema (unknown/non-finite -> error). Provenance
+    (git SHA + a stable config hash) is stamped automatically; pass `timestamp` for reproducible
+    records (else it is left None for the caller/CLI to fill).
+    """
+    if harness not in _HARNESSES:
+        raise ValueError(f"unknown harness {harness!r}; expected one of {_HARNESSES}")
+    valid = validate_metrics(metrics, strict=True)
+    cfg_hash = None
+    if syn_cfg is not None:
+        cfg_hash = config_hash(asdict(syn_cfg))
+    return RunRecord(
+        run_id=run_id,
+        harness=harness,
+        metrics=valid,
+        git_sha=_git_sha(),
+        config_hash=cfg_hash,
+        seed=seed,
+        hardware=_hardware_string(),
+        dataset_shards=list(dataset_shards or []),
+        timestamp=timestamp,
+        notes=notes,
+    )
+
+
+def append_record(record: RunRecord, path: str = DEFAULT_REGISTRY) -> None:
+    """Append a record to the committed JSONL registry (creating the dir/file if needed)."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record.to_json(), sort_keys=True) + "\n")
+
+
+def read_records(path: str = DEFAULT_REGISTRY) -> List[RunRecord]:
+    if not os.path.exists(path):
+        return []
+    out: List[RunRecord] = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                out.append(RunRecord.from_json(json.loads(line)))
+    return out
+
+
+def best_record(records: List[RunRecord], metric: str) -> Optional[RunRecord]:
+    """The record optimizing `metric` per its schema direction (lower/higher better)."""
+    spec = get_metric(metric)
+    if spec is None:
+        raise KeyError(f"unknown metric {metric!r}")
+    have = [r for r in records if metric in r.metrics]
+    if not have:
+        return None
+    reverse = spec.direction == Direction.HIGHER_BETTER
+    return sorted(have, key=lambda r: r.metrics[metric], reverse=reverse)[0]
+
+
+def summarize(records: List[RunRecord], *, harness: Optional[str] = None, limit: int = 20) -> str:
+    rows = [r for r in records if harness is None or r.harness == harness]
+    rows = rows[-limit:]
+    if not rows:
+        return "(no runs in the registry)"
+    lines = [f"{len(rows)} run(s):"]
+    for r in rows:
+        m = ", ".join(f"{k}={v:.4g}" for k, v in sorted(r.metrics.items())[:4])
+        sha = (r.git_sha or "????????")[:8]
+        lines.append(f"  [{r.harness:5}] {r.run_id}  sha={sha} cfg={r.config_hash or '-'}  {m}")
+    return "\n".join(lines)
+
+
+def _main(argv: Optional[List[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description="Query the bio_inspired_nanochat results registry.")
+    ap.add_argument("command", choices=["list", "best"])
+    ap.add_argument("--path", default=DEFAULT_REGISTRY)
+    ap.add_argument("--harness", default=None)
+    ap.add_argument("--metric", default="val_bpb")
+    ap.add_argument("--limit", type=int, default=20)
+    args = ap.parse_args(argv)
+    records = read_records(args.path)
+    if args.command == "list":
+        print(summarize(records, harness=args.harness, limit=args.limit))
+    else:
+        b = best_record(records, args.metric)
+        print(f"best by {args.metric}: {b.run_id} = {b.metrics[args.metric]:.4g}" if b else "(none)")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(_main())
