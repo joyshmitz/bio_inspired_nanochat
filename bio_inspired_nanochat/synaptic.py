@@ -1438,12 +1438,12 @@ class SynapticCausalSelfAttention(nn.Module):
             topk = min(self.cfg.attn_topk, Tk)
             vals, idx = torch.topk(dots, topk, dim=-1)
             valid = torch.isfinite(vals)
-            # NOTE (8j9.2): the FlexAttention path computes its OWN release in flex_synaptic.py
-            # (sigmoid + AMP quantal size) and depends on release() advancing presyn_state with
-            # legacy-consistent dynamics (evolving AMP). It therefore stays on release() until
-            # the flex path is migrated to the canonical formulation (tracked follow-up). Do NOT
-            # switch this to release_canonical alone — that would freeze AMP under flex.
-            _ = self.pre.release(presyn_state, vals, idx, train_mode, valid=valid)
+            # s3w9: the FlexAttention path now computes its bias from the CANONICAL faithful
+            # formulation (flex_synaptic.precompute_bio_factors: Hill + energy-qamp), so it
+            # advances presyn_state via release_canonical too — consistent with the standard path
+            # (BUF active, AMP superseded by energy-qamp). The flex score_mod applies its own
+            # logit-level bias + barrier, so the canonical barrier stays off here.
+            _ = self.pre.release_canonical(presyn_state, vals, idx, train_mode, valid=valid)
 
             from torch.nn.attention.flex_attention import create_block_mask
 
