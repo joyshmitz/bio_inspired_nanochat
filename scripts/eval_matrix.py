@@ -432,6 +432,21 @@ def _error_row(
     }
 
 
+def _resolve_niah_lengths(niah_lengths: str, max_len: int) -> tuple[int, ...]:
+    """Resolve the NIAH context lengths for an eval run (v7c).
+
+    A non-empty ``niah_lengths`` ("16,64,128") is parsed and each length kept only if it fits the
+    model context (``8 <= L <= max_len``); an empty string defaults to ``(16, 64, max_len)``.
+    Returns a de-duplicated, sorted, clamped tuple (possibly empty if nothing fits).
+    """
+    if niah_lengths.strip():
+        requested = [int(x) for x in niah_lengths.split(",") if x.strip()]
+    else:
+        requested = [16, 64, max_len]
+    kept = sorted({length for length in requested if 8 <= length <= max_len})
+    return tuple(kept)
+
+
 def _run_one(
     *,
     preset: PresetId,
@@ -459,6 +474,7 @@ def _run_one(
     core_eval: bool,
     core_max_per_task: int,
     ece_bins: int,
+    niah_lengths: str = "",
     init_type: str,
     use_moe: bool,
     num_experts: int,
@@ -685,13 +701,13 @@ def _run_one(
         from bio_inspired_nanochat.synthetic_tasks import niah_accuracy_by_length
 
         max_len = min(int(sequence_len) - 2, 256)
-        niah_lengths = tuple(length for length in (16, 64, max_len) if 8 <= length <= max_len)
-        if niah_lengths:
+        lengths_used = _resolve_niah_lengths(niah_lengths, max_len)
+        if lengths_used:
             niah_acc = float(
                 niah_accuracy_by_length(
                     model,
                     vocab_size=min(64, int(vocab_size)),
-                    lengths=niah_lengths,
+                    lengths=lengths_used,
                     batch=32,
                     seed=int(seed),
                     device=device,
@@ -797,6 +813,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         core_eval=args.core_eval,
         core_max_per_task=args.core_max_per_task,
         ece_bins=args.ece_bins,
+        niah_lengths=args.niah_lengths,
         init_type=args.init_type,
         use_moe=args.use_moe,
         num_experts=args.num_experts,
@@ -850,6 +867,7 @@ def _run_batch(
                     core_eval=args.core_eval,
                     core_max_per_task=args.core_max_per_task,
                     ece_bins=args.ece_bins,
+                    niah_lengths=args.niah_lengths,
                     init_type=args.init_type,
                     use_moe=args.use_moe,
                     num_experts=args.num_experts,
@@ -927,6 +945,11 @@ def main() -> int:
         p.add_argument("--core-eval", action="store_true", help="Also compute CORE metric (requires eval bundle)")
         p.add_argument("--core-max-per-task", type=int, default=200)
         p.add_argument("--ece-bins", type=int, default=15)
+        p.add_argument(
+            "--niah-lengths", default="",
+            help="Comma-separated NIAH context lengths, e.g. '16,64,128' (default: 16,64,<model max>); "
+            "clamped to the model context. Use fixed --seed for reproducibility.",
+        )
         p.add_argument("--batch-id", default=None, help="Optional subdirectory name under --out-dir")
         p.add_argument("--fail-fast", action="store_true", help="Stop the batch on the first failure")
 

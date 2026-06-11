@@ -26,7 +26,26 @@ from bio_inspired_nanochat.synthetic_tasks import (
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _bio_testkit import make_tiny_synaptic, make_tiny_vanilla  # noqa: E402
 
+from scripts.eval_matrix import _resolve_niah_lengths  # noqa: E402
+
 pytestmark = pytest.mark.unit
+
+
+# --------------------------------------------------------------------------- #
+# v7c: CLI-configurable NIAH context lengths (--niah-lengths), clamped to model
+# --------------------------------------------------------------------------- #
+def test_resolve_niah_lengths_default_and_parsing():
+    # empty -> default (16, 64, max_len), de-duplicated/sorted/clamped
+    assert _resolve_niah_lengths("", 128) == (16, 64, 128)
+    assert _resolve_niah_lengths("", 32) == (16, 32)  # 64 doesn't fit; max_len=32 included
+    # explicit list parsed and clamped to the model context
+    assert _resolve_niah_lengths("16,64,128", 128) == (16, 64, 128)
+    assert _resolve_niah_lengths("16,64,512", 128) == (16, 64)  # 512 > max_len dropped
+    assert _resolve_niah_lengths("4,16", 128) == (16,)          # 4 < 8 dropped
+    # whitespace tolerant, de-duplicated, sorted
+    assert _resolve_niah_lengths(" 64 , 16 ,64 ", 128) == (16, 64)
+    # nothing fits -> empty (the caller then skips the NIAH probe)
+    assert _resolve_niah_lengths("1000", 128) == ()
 
 VOCAB = 64
 

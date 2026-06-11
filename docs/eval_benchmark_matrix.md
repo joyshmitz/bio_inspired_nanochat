@@ -59,7 +59,7 @@ Three budgets (to keep iteration fast, then do real comparisons):
 ### Sequence lengths
 
 - **Train**: `2048` (default), optionally `1024` for smoke.
-- **Long-context (NIAH)**: length × depth sweep (default `16/64/up-to-seq_len`; `4096`/`8192` for large models).
+- **Long-context (NIAH)**: length × depth sweep, configurable via `--niah-lengths "16,64,128"` (v7c; default `16/64/up-to-seq_len`, clamped to the model context; use `4096`/`8192` for large models). Pass a fixed `--seed` for reproducible needle placement.
 
 ---
 
@@ -159,6 +159,7 @@ Current harness implementation (initial):
 
 - Single run:
   - `python -m scripts.eval_matrix run --preset vanilla --train-tokens 10000000 --seed 1337`
+  - With explicit, reproducible NIAH lengths: `... run --preset bio_all --seed 1337 --niah-lengths 16,64,128`
 - Batch run (creates `runs/eval_matrix/matrix_<timestamp>/` unless `--batch-id` is provided):
   - `python -m scripts.eval_matrix matrix --presets vanilla,bio_all --seeds 1337,1338 --train-tokens 10000000`
 - Standard ablation sweep (creates `runs/eval_matrix/ablation_<timestamp>/`):
