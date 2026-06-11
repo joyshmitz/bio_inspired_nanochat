@@ -351,6 +351,81 @@ def affine_scan(a: Tensor, b: Tensor, x0: Optional[Tensor] = None) -> Tensor:
     return A * x0 + B
 
 
+def _soft_relu(x: Tensor, beta: float) -> Tensor:
+    """Smooth max(x, 0) = softplus(βx)/β. Differentiable everywhere; → relu as β→∞."""
+    return F.softplus(beta * x) / beta
+
+
+def _soft_min(x: Tensor, c: float, beta: float) -> Tensor:
+    """Smooth min(x, c). Differentiable everywhere; → hard min as β→∞."""
+    return c - _soft_relu(c - x, beta)
+
+
+def vesicle_depletion_refill(
+    rrp: Tensor,
+    res: Tensor,
+    delay: List[Tensor],
+    released: Tensor,
+    *,
+    prime_rate: float,
+    rec_rate: float,
+    rrp_cap: float = 30.0,
+    beta: float = 50.0,
+) -> Tuple[Tensor, Tensor, List[Tensor], Dict[str, Tensor]]:
+    """One DIFFERENTIABLE, conservation-accurate step of the vesicle-pool dynamics (yw9.2.2).
+
+    Mirrors the (currently `no_grad`, hard-clamped) RRP/RES/DELAY update inside
+    ``release_canonical``, but (a) every clamp is a smooth softplus surrogate so gradients flow
+    (``gradcheck`` passes), and (b) the pool bookkeeping is written as **explicit paired
+    transfers**, so the conservation invariant holds *structurally*, independent of the surrogate
+    sharpness:
+
+        Δ(RRP + RES + Σdelay) = − released_eff · (1 − rec_rate)
+
+    i.e. total vesicles change ONLY by the explicitly-modelled endocytosis recycling leak (exact
+    conservation at ``rec_rate = 1``). No vesicles are spuriously lost to clamps: over-depletion is
+    prevented by bounding the release to the available RRP, and the RRP cap routes the excess BACK
+    to the reserve rather than discarding it.
+
+    Transfers, in reference order (deplete → recover/prime → cap):
+      RRP --released_eff--> in-flight (×rec_rate; the rest is the accounted leak)
+      delay[0] --recovered--> RES;  RES --primed--> RRP;  RRP --over--> RES (cap)
+
+    Args:
+      rrp, res: ``(...)`` pools. delay: list of ``endo_delay`` in-flight tensors (oldest first).
+      released: requested release this step (bounded to available RRP internally).
+    Returns: ``(rrp', res', delay', diagnostics)``.
+    """
+    endo = len(delay)
+    zeros = torch.zeros_like(rrp)
+    # 1) release: deplete RRP (bounded to available so RRP stays >= 0), recycle a fraction in-flight
+    released_eff = _soft_min(released, rrp, beta)
+    rrp1 = rrp - released_eff
+    recycled = released_eff * rec_rate
+    # 2) recovery: oldest in-flight returns to the reserve
+    recovered = delay[0] if endo > 0 else zeros
+    res1 = res + recovered
+    # 3) priming: move prime_rate · soft_min(RES, 1) from reserve to RRP
+    take = _soft_min(res1, 1.0, beta)
+    primed = prime_rate * take
+    res2 = res1 - primed
+    rrp2 = rrp1 + primed
+    # 4) RRP cap: route the excess back to the reserve (conserve, don't discard)
+    over = _soft_relu(rrp2 - rrp_cap, beta)
+    rrp3 = rrp2 - over
+    res3 = res2 + over
+    # 5) in-flight queue shift (drop the recovered head, append the newly recycled tail)
+    new_delay = (delay[1:] if endo > 0 else []) + [recycled]
+    diagnostics = {
+        "released_eff": released_eff,
+        "recycled": recycled,
+        "recovered": recovered,
+        "primed": primed,
+        "over": over,
+    }
+    return rrp3, res3, new_delay, diagnostics
+
+
 # -----------------------------------------------------------------------------
 # Presynaptic biophysics
 # -----------------------------------------------------------------------------
