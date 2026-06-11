@@ -1371,6 +1371,7 @@ class SynapticMoE(nn.Module):
     cfg: SynapticConfig
     last_aux_loss: Optional[Tensor]
     last_ctx: Dict[str, Tensor]
+    last_neuroscore: Optional[Tensor]
     """Top-k sparse Synaptic MoE with router embeddings, expert fatigue/energy,
     contrastive router-embedding updates, and split/merge structural hooks."""
 
@@ -1406,6 +1407,9 @@ class SynapticMoE(nn.Module):
         )  # updated by EMA-style rule
         object.__setattr__(self, "last_aux_loss", None)
         object.__setattr__(self, "last_ctx", {})
+        # Per-expert NeuroScore fitness in [0,1], published by NeuroScore.step (de5l).
+        # The split/merge controller blends it into health when cfg.use_neuroscore.
+        object.__setattr__(self, "last_neuroscore", None)
 
         # Molecular Genetics: Xi (The Genome)
         self.Xi = nn.Parameter(torch.zeros(num_experts, cfg.xi_dim))

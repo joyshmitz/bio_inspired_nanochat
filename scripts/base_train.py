@@ -76,6 +76,8 @@ merge_health_max = 0.25  # merge health threshold
 splits_per_call = 1  # splits per step
 merges_per_call = 1  # merges per step
 split_health_min = 0.80  # split health threshold
+sm_use_neuroscore = 0  # blend NeuroScore fitness into lifecycle health (needs NeuroViz/NeuroScore active)
+sm_neuroscore_weight = 0.5  # blend weight in [0,1] when sm_use_neuroscore=1
 sm_verbose = 0  # verbose split/merge logging
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
 num_iterations = -1  # explicit number of steps of the optimization (-1 = disable)
@@ -339,6 +341,8 @@ if splitmerge_every > 0:
         split_health_min=split_health_min,
         splits_per_call=splits_per_call,
         min_step_interval=splitmerge_every,
+        use_neuroscore=bool(sm_use_neuroscore),
+        neuroscore_weight=float(sm_neuroscore_weight),
         verbose=bool(sm_verbose),
         ddp_broadcast=True,
     )

@@ -97,6 +97,8 @@ class NeuroScore:
                                 self._update_specialization(st, x_in, indices, module.num_experts)
                                 if self.neuroviz:
                                     self._log_metrics(layer_name, st, global_step)
+                            # Publish composite fitness for the lifecycle controller (de5l).
+                            self._publish_score(module, st)
                             continue
                     except ImportError:
                         pass
@@ -155,9 +157,44 @@ class NeuroScore:
 
                 st["updates"] += 1
 
+                # Publish the composite fitness for the split/merge controller (de5l).
+                self._publish_score(module, st)
+
                 # Log to NeuroViz/TensorBoard if connected
                 if self.neuroviz and global_step % self.cfg.update_every == 0:
                     self._log_metrics(layer_name, st, global_step)
+
+    @staticmethod
+    def composite_fitness(
+        efficiency: Tensor, specialization: Tensor, resilience: Tensor
+    ) -> Tensor:
+        """Blend the three NeuroScore metrics into a per-expert fitness in [0,1].
+
+        Each metric is min-max normalized across experts first (so their heterogeneous
+        scales — efficiency is contribution/energy, resilience is 1/variance — become
+        comparable), then averaged. A degenerate all-equal metric maps to a neutral 0.5
+        so it neither helps nor hurts. Higher = fitter (more split-worthy, less
+        merge-worthy), matching the health convention the lifecycle controller uses.
+        """
+        def _norm(x: Tensor) -> Tensor:
+            x = x.detach().float()
+            lo = x.min()
+            rng = x.max() - lo
+            if float(rng) < 1e-8:
+                return torch.full_like(x, 0.5)
+            return (x - lo) / rng
+
+        comp = (_norm(efficiency) + _norm(specialization) + _norm(resilience)) / 3.0
+        return comp.clamp(0.0, 1.0)
+
+    def _publish_score(self, module: nn.Module, st: Dict[str, Any]) -> None:
+        """Write the composite fitness onto the MoE module (``last_neuroscore``) so the
+        SplitMergeController can blend it into health when ``use_neuroscore`` is on.
+        Stored on the stats' device (CPU); the controller re-homes it to the layer."""
+        comp = self.composite_fitness(
+            st["efficiency"], st["specialization"], st["resilience"]
+        )
+        object.__setattr__(module, "last_neuroscore", comp)
 
     def _update_specialization(self, st, x, indices, num_experts):
         """

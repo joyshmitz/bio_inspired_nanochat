@@ -66,6 +66,14 @@ class SplitMergeConfig:
     use_util_weighting: bool = (
         True  # weight merge by winner/loser utilization (via fatigue proxy)
     )
+    # NeuroScore credit assignment (de5l): when enabled, blend the per-expert
+    # NeuroScore fitness (Efficiency/Specialization/Resilience, published onto each
+    # SynapticMoE as last_neuroscore by NeuroScore.step) into the health signal that
+    # drives every split/merge/reset decision. Default-off so the lifecycle stays a
+    # pure utilization*energy economy unless an experiment opts in; requires an active
+    # NeuroScore (NeuroVizManager) so last_neuroscore is populated, else it no-ops.
+    use_neuroscore: bool = False
+    neuroscore_weight: float = 0.5  # blend weight in [0,1]: health=(1-w)*health + w*score
     # Logging
     verbose: bool = False
 
@@ -395,6 +403,16 @@ class SplitMergeController:
         util = cast(Tensor, layer.fatigue).clamp(0, 1)  # fatigue tracks EMA of utilization
         eng = cast(Tensor, layer.energy).clamp(0, 1)
         health = util * eng  # [0,1]
+        # NeuroScore credit assignment (de5l): blend the per-expert fitness published by
+        # NeuroScore.step into health, so Efficiency/Specialization/Resilience — not just
+        # raw utilization*energy — drive split/merge/reset selection. Falls back to pure
+        # health when disabled or the score is unavailable/mis-shaped.
+        if self.cfg.use_neuroscore:
+            score = getattr(layer, "last_neuroscore", None)
+            if score is not None and tuple(score.shape) == tuple(health.shape):
+                w = float(self.cfg.neuroscore_weight)
+                score = cast(Tensor, score).to(health.device, health.dtype).clamp(0, 1)
+                health = (1.0 - w) * health + w * score
         return health
 
     @torch.no_grad()
