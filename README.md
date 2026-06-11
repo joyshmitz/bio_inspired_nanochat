@@ -116,6 +116,19 @@ graph TD
     Absorb --> Healthy
 ```
 
+### 4. Neuromodulation (Global State)
+
+*The mechanism of "Context-Dependent Gating"*
+
+**The Biology**: Real plasticity is gated by a few **global neuromodulators** broadcast brain-wide. Dopamine (DA) signals reward-prediction error; acetylcholine (ACh) signals uncertainty/attention; norepinephrine (NE) signals arousal/novelty.
+
+**The Math** (`hy8.1`, `NeuromodulatoryBus`, opt-in via `neuromod_enabled=1`): three scalars are computed each step from model signals (loss-improvement → DA, predictive entropy → ACh, loss-surprise → NE), EMA-smoothed, and **broadcast** as multiplicative gains onto every synapse:
+*   **DA → plasticity gain**: scales the online Hebbian consolidation, so only reward-relevant / loss-reducing updates stick. This is the third factor that bridges Hebbian plasticity to RL (`hy8.2`).
+*   **ACh → exploration**: scales the stochastic vesicle-release fraction — more uncertainty, more exploration.
+*   **NE → global gain / reset**: scales the synaptic output and, on a surprising event, flushes the per-sequence working memory.
+
+Default-neutral (gains 1.0) when off, so it's a no-op unless enabled; telemetry exposes all three levels and gains per step.
+
 ---
 
 ## 🚀 Advanced Bio-Inspired Features (Roadmap)

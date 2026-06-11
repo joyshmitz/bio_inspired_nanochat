@@ -81,6 +81,9 @@ sm_neuroscore_weight = 0.5  # blend weight in [0,1] when sm_use_neuroscore=1
 sm_function_preserving = 1  # Net2Net/firefly: make split/merge output-preserving (uta.3); 0=legacy noisy clone
 sm_fp_divergence_noise = 0.02  # relative (to weight RMS) antisymmetric fc1 noise for function-preserving split
 sm_verbose = 0  # verbose split/merge logging
+# Neuromodulatory bus (hy8.1): global DA/ACh/NE scalars gating plasticity/exploration/gain.
+neuromod_enabled = 0  # 1=compute DA/ACh/NE from loss+entropy each step and broadcast to synapses
+neuromod_log_every = 100  # print neuromodulator telemetry every N steps (0=never)
 # Training horizon. Only one of these 3 will be used, in this order of precedence.
 num_iterations = -1  # explicit number of steps of the optimization (-1 = disable)
 target_flops = -1.0  # calculate num_iterations to reach target_flops. Useful for scaling laws experiments (-1 = disable)
@@ -356,6 +359,13 @@ if splitmerge_every > 0:
         ddp_broadcast=True,
     )
     sm_ctrl = SplitMergeController(orig_model, sm_cfg, logger=viz)
+
+# Neuromodulatory bus (hy8.1): only for synaptic models, opt-in. Default-neutral when off.
+nm_bus = None
+if neuromod_enabled and use_syn:
+    from bio_inspired_nanochat.neuromod import NeuromodulatoryBus
+
+    nm_bus = NeuromodulatoryBus()
 
 if resuming:
     for opt, dat in zip(optimizers, optimizer_data):
@@ -637,6 +647,21 @@ while True:
         # Pass ALL optimizers so split/merge resets stale momentum wherever the changed
         # expert/router weights live: AdamW (1D/embeddings) AND Muon (2D matrices). vg9.3.
         sm_ctrl.step(step, optimizer=optimizers)
+
+    # Neuromodulatory bus (hy8.1): compute DA/ACh/NE from this step's loss + predictive entropy
+    # and broadcast the gains so they gate the NEXT step's plasticity/exploration/gain.
+    if nm_bus is not None:
+        # use_syn guarantees the model returned (logits, loss), so logits is defined here.
+        nm_entropy = nm_bus.entropy_from_logits(logits)
+        nm_bus.update(loss=float(train_loss), entropy=nm_entropy)
+        nm_bus.broadcast(orig_model)
+        if neuromod_log_every and step % neuromod_log_every == 0:
+            tel = nm_bus.telemetry()
+            print0(
+                f"  [neuromod] DA={tel['nm/da']:+.3f} ACh={tel['nm/ach']:.3f} NE={tel['nm/ne']:.3f} "
+                f"| gains: plast={tel['nm/gain_plasticity']:.3f} explore={tel['nm/gain_explore']:.3f} "
+                f"glob={tel['nm/gain_global']:.3f}"
+            )
     synchronize()
     t1 = time.time()
     dt = t1 - t0

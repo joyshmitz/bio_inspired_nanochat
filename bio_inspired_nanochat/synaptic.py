@@ -402,10 +402,12 @@ class SynapticPresyn(nn.Module):
 
         # --- faithful Hill release probability, then release = p * available RRP (<= RRP) ---
         p = self._faithful_release_prob(c_edge, pr_edge, cl_edge, drive)
-        if train and cfg.stochastic_train_frac > 0:
-            do_stoch = torch.rand_like(p[..., 0].to(torch.float32)) < float(
-                cfg.stochastic_train_frac
-            )
+        # hy8.1: acetylcholine (uncertainty/attention) gates exploration via the stochastic-
+        # release fraction. Default-neutral (gain 1.0) unless a NeuromodulatoryBus broadcasts a
+        # gain; higher ACh => more stochastic vesicle release => more exploration. Clamped [0,1].
+        ach_frac = min(1.0, max(0.0, cfg.stochastic_train_frac * getattr(self, "_nm_ach_gain", 1.0)))
+        if train and ach_frac > 0:
+            do_stoch = torch.rand_like(p[..., 0].to(torch.float32)) < float(ach_frac)
             rel_det = p * rrp_edge
             if do_stoch.any():
                 stoch_mask = do_stoch.unsqueeze(-1).expand_as(p)
@@ -980,6 +982,11 @@ class SynapticLinear(nn.Module):
                 gs = gate_scale.to(device=self.w_fast.device, dtype=self.w_fast.dtype)
             delta = self.u_buf @ self.v_buf
             delta = delta * gs.to(delta.dtype)
+            # hy8.1: dopamine (reward-prediction-error) plasticity gain. Default-neutral
+            # (1.0) unless a NeuromodulatoryBus has broadcast a gain — then it scales the
+            # consolidation step so only reward-relevant updates are amplified (the three-factor
+            # bridge to RL, hy8.2). Applied to the step, not delta, so it survives normalization.
+            da = getattr(self, "_nm_da_gain", 1.0)
             if self.cfg.fast_weight_normalized:
                 # sax.1: normalized + norm-bounded online write. Step BOTH the fast and slow
                 # online Hebbian writes along the unit-norm Hebbian direction (impactful
@@ -992,17 +999,17 @@ class SynapticLinear(nn.Module):
                 if float(dn) > 1e-12:
                     direction = delta / dn
                     self.w_fast.mul_(self.cfg.post_fast_decay).add_(
-                        self.cfg.fast_weight_eta * direction
+                        (self.cfg.fast_weight_eta * da) * direction
                     )
                     maxn = self.cfg.fast_weight_max_norm
                     if maxn > 0:
                         wn = self.w_fast.norm()
                         if float(wn) > maxn:
                             self.w_fast.mul_(maxn / wn)
-                    self.w_slow.add_(self.cfg.post_slow_lr * direction)
+                    self.w_slow.add_((self.cfg.post_slow_lr * da) * direction)
             else:
-                self.w_fast.mul_(self.cfg.post_fast_decay).add_(self.cfg.post_fast_lr * delta)
-                self.w_slow.add_(self.cfg.post_slow_lr * delta)
+                self.w_fast.mul_(self.cfg.post_fast_decay).add_((self.cfg.post_fast_lr * da) * delta)
+                self.w_slow.add_((self.cfg.post_slow_lr * da) * delta)
         self.post.hebb_fast(self.u_buf, self.v_buf)
         self.post.consolidate(self.u_buf, self.v_buf)
 
@@ -1119,6 +1126,13 @@ class SynapticLinear(nn.Module):
                         # Inference: no backward pending -> apply the writes now (legacy path).
                         gate_scale = fast_gate.mean() if fast_gate is not None else None
                         self._apply_hebb_weight_writes(gate_scale)
+
+        # hy8.1: norepinephrine (arousal/novelty) global-gain neuromodulation. Default-neutral
+        # (1.0) unless a NeuromodulatoryBus has broadcast a gain onto this module. Modulates the
+        # broadcast output (not the local Hebbian trace), so it gates downstream signal gain.
+        ne_gain = getattr(self, "_nm_ne_gain", 1.0)
+        if ne_gain != 1.0:
+            y = y * ne_gain
 
         return y
 
