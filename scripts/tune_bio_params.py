@@ -45,7 +45,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, Sequence
+from typing import Any, Dict, Sequence
 
 import cma
 import numpy as np
@@ -245,11 +245,16 @@ def run_rosenbrock_2d_cmaes(
 # Synthetic Task: Associative Recall / Copy
 # -----------------------------------------------------------------------------
 
-def generate_batch(batch_size: int, seq_len: int, vocab_size: int, device: str):
+def generate_batch(
+    batch_size: int, seq_len: int, vocab_size: int, device: str, *, seed: int | None = None
+):
     """
     Generates a 'Needle in a Haystack' / Copy task.
     Sequence: [Key1] [Val1] ... [KeyK] [ValK] ... [Query:Key1] -> [Target:Val1]
     The model must use working memory (synapses) to store bindings.
+
+    Pass ``seed`` for a REPRODUCIBLE batch (used to build a fixed held-out set that is
+    identical across candidates, so the held-out objective is a fair comparison — 74f.1).
     """
     if seq_len % 2 != 0:
         raise ValueError("generate_batch copy task requires an even seq_len")
@@ -260,7 +265,11 @@ def generate_batch(batch_size: int, seq_len: int, vocab_size: int, device: str):
     # Training uses *next-token* targets (like pretraining), so we only score
     # predictions that generate the second half from the first half.
     half = seq_len // 2
-    data = torch.randint(0, vocab_size, (batch_size, half), device=device)
+    if seed is None:
+        data = torch.randint(0, vocab_size, (batch_size, half), device=device)
+    else:
+        gen = torch.Generator().manual_seed(int(seed))
+        data = torch.randint(0, vocab_size, (batch_size, half), generator=gen).to(device)
 
     # Inputs: [Data] [Data]
     x = torch.cat([data, data], dim=1)  # (B, T)
@@ -477,6 +486,16 @@ class CandidateEvalResult:
     steps_run: int
     lce_pred_loss: float | None = None
     losses: list[float] | None = None
+    held_out_loss: float | None = None  # loss on a FIXED held-out set (74f.1)
+
+    @property
+    def objective(self) -> float:
+        """The value to minimize: the held-out loss when available (74f.1 — it is far
+        less noisy than the last-k training loss and measures generalization), else the
+        mean last-k training loss."""
+        if self.held_out_loss is not None and math.isfinite(self.held_out_loss):
+            return self.held_out_loss
+        return self.mean_last_loss
 
 
 def _lce_predict_from_points(
@@ -541,6 +560,10 @@ def evaluate_candidate_detailed(
     lce_tail_points: int = 50,
     lce_stride: int = 1,
     record_losses: bool = False,
+    model_config: GPTSynapticConfig = MODEL_CONFIG,
+    reset_state: bool = True,
+    held_out_batches: int = 8,
+    held_out_seed: int = 12345,
 ) -> CandidateEvalResult:
     """
     Instantiates a model with specific bio-parameters and runs a short training loop.
@@ -565,12 +588,13 @@ def evaluate_candidate_detailed(
 
             # 2) Build config
             syn_cfg = _build_synaptic_config(param_dict)
-            model_cfg = replace(MODEL_CONFIG, syn_cfg=syn_cfg)
+            model_cfg = replace(model_config, syn_cfg=syn_cfg)
 
             # 3) Build model
             _seed_everything(seed)
             model = GPTSynaptic(model_cfg).to(device)
             model.train()
+            can_reset = reset_state and hasattr(model, "reset_sequence_state")
 
             # 4) Optimizer
             optim = torch.optim.AdamW(
@@ -595,6 +619,12 @@ def evaluate_candidate_detailed(
                         f"Candidate evaluation exceeded timeout_seconds={timeout_seconds}"
                     )
 
+                # Per-sequence reset of plasticity state (74f.1): each synthetic batch is
+                # an independent sequence. WITHOUT this the eligibility/fast-weight state
+                # accumulates across batches and the synaptic candidate diverges to NaN ->
+                # PENALTY_LOSS, which is a major reason the objective was uninformative.
+                if can_reset:
+                    model.reset_sequence_state(reset_fast_weights=True)
                 x, y = generate_batch(
                     batch_size, model_cfg.sequence_len, model_cfg.vocab_size, device
                 )
@@ -618,6 +648,29 @@ def evaluate_candidate_detailed(
             if not math.isfinite(mean_last_loss):
                 raise FloatingPointError("Non-finite mean_last_loss encountered during evaluation")
 
+            # Held-out evaluation (74f.1): score generalization on a FIXED held-out set
+            # (identical across all candidates), which is far less noisy than the last-k
+            # training loss and is the objective the optimizer should actually minimize.
+            held_out_loss: float | None = None
+            if held_out_batches > 0:
+                model.eval()
+                ho_losses: list[float] = []
+                with torch.no_grad():
+                    for j in range(int(held_out_batches)):
+                        if can_reset:
+                            model.reset_sequence_state(reset_fast_weights=True)
+                        xho, yho = generate_batch(
+                            batch_size,
+                            model_cfg.sequence_len,
+                            model_cfg.vocab_size,
+                            device,
+                            seed=int(held_out_seed) + j,
+                        )
+                        _, lho = model(xho, yho)
+                        ho_losses.append(float(lho.item()))
+                ho_mean = float(np.mean(ho_losses)) if ho_losses else PENALTY_LOSS
+                held_out_loss = ho_mean if math.isfinite(ho_mean) else PENALTY_LOSS
+
             lce_pred = None
             if use_lce and lce_target is not None and lce_points is not None:
                 lce_pred = _lce_predict_from_points(
@@ -633,6 +686,7 @@ def evaluate_candidate_detailed(
                 steps_run=steps_i,
                 lce_pred_loss=lce_pred,
                 losses=all_losses,
+                held_out_loss=held_out_loss,
             )
 
         except Exception as exc:
@@ -648,6 +702,119 @@ def evaluate_candidate_detailed(
     if raise_on_error and last_exc is not None:
         raise last_exc
     return CandidateEvalResult(mean_last_loss=PENALTY_LOSS, steps_run=steps_i)
+
+
+# -----------------------------------------------------------------------------
+# Multi-seed objective + proxy readiness gate (bead 74f.1)
+# -----------------------------------------------------------------------------
+def multi_seed_objective(
+    solution_vector: np.ndarray,
+    *,
+    specs: Sequence[ParamSpec],
+    seeds: Sequence[int],
+    steps: int,
+    batch_size: int = BATCH_SIZE,
+    device: str = DEVICE,
+    lr: float = 3e-3,
+    weight_decay: float = 0.0,
+    model_config: GPTSynapticConfig = MODEL_CONFIG,
+    held_out_batches: int = 8,
+) -> dict[str, Any]:
+    """Held-out objective averaged over several TRAINING seeds (74f.1).
+
+    Averaging over >=3 seeds shrinks the objective's seed-noise by ~sqrt(n), so a signal
+    that was below single-seed noise becomes measurable. Returns the per-seed objectives
+    plus their mean and (sample) std.
+    """
+    per_seed: dict[int, float] = {}
+    for s in seeds:
+        res = evaluate_candidate_detailed(
+            solution_vector,
+            specs=specs,
+            seed=int(s),
+            steps=steps,
+            batch_size=batch_size,
+            device=device,
+            lr=lr,
+            weight_decay=weight_decay,
+            timeout_seconds=None,
+            max_retries=0,
+            raise_on_error=False,
+            model_config=model_config,
+            held_out_batches=held_out_batches,
+        )
+        per_seed[int(s)] = res.objective
+    vals = np.array(list(per_seed.values()), dtype=np.float64)
+    return {
+        "per_seed": per_seed,
+        "mean": float(vals.mean()),
+        "std": float(vals.std(ddof=1)) if vals.size > 1 else 0.0,
+        "n": int(vals.size),
+    }
+
+
+def readiness_from_objectives(
+    good_per_seed: dict[int, float],
+    bad_per_seed: dict[int, float],
+    *,
+    sigma_gate: float = 3.0,
+    rel_gate: float = 0.005,
+) -> dict[str, Any]:
+    """Compute the proxy readiness gate from two configs' per-seed objectives.
+
+    Separated from the (expensive) training so it can be unit-tested deterministically.
+    The proxy is READY when the good/bad configs separate by > ``sigma_gate`` units of
+    seed-noise AND by >= ``rel_gate`` relative improvement, and the paired test (matched
+    seeds, via eval_stats) is significant — i.e. the objective carries signal over noise.
+    """
+    from bio_inspired_nanochat.eval_stats import paired_comparison
+
+    g = np.array(list(good_per_seed.values()), dtype=np.float64)
+    b = np.array(list(bad_per_seed.values()), dtype=np.float64)
+    g_std = float(g.std(ddof=1)) if g.size > 1 else 0.0
+    b_std = float(b.std(ddof=1)) if b.size > 1 else 0.0
+    seed_sigma = math.sqrt((g_std**2 + b_std**2) / 2.0)
+    signal = abs(float(g.mean()) - float(b.mean()))
+    sigma_sep = signal / seed_sigma if seed_sigma > 1e-12 else float("inf")
+    rel = signal / abs(float(b.mean())) if abs(float(b.mean())) > 1e-12 else float("inf")
+    paired = paired_comparison(good_per_seed, bad_per_seed, lower_is_better=True)
+    p_t = paired.t_p_value if paired else float("nan")
+    p_w = paired.wilcoxon_p_value if paired else float("nan")
+    return {
+        "good_mean": float(g.mean()),
+        "bad_mean": float(b.mean()),
+        "signal": signal,
+        "seed_sigma": seed_sigma,
+        "sigma_separation": sigma_sep,
+        "relative_improvement": rel,
+        "paired_t_p": p_t,
+        "paired_wilcoxon_p": p_w,
+        "ready": bool(sigma_sep >= sigma_gate and rel >= rel_gate),
+        "sigma_gate": sigma_gate,
+        "rel_gate": rel_gate,
+    }
+
+
+def proxy_signal_check(
+    good_vector: np.ndarray,
+    bad_vector: np.ndarray,
+    *,
+    specs: Sequence[ParamSpec],
+    seeds: Sequence[int],
+    steps: int,
+    sigma_gate: float = 3.0,
+    rel_gate: float = 0.005,
+    **eval_kw: Any,
+) -> dict[str, Any]:
+    """End-to-end proxy readiness gate (74f.1 acceptance): run the multi-seed held-out
+    objective for a known-good and known-bad config on the SAME seeds and report whether
+    they separate by > ``sigma_gate`` of seed-noise."""
+    good = multi_seed_objective(good_vector, specs=specs, seeds=seeds, steps=steps, **eval_kw)
+    bad = multi_seed_objective(bad_vector, specs=specs, seeds=seeds, steps=steps, **eval_kw)
+    gate = readiness_from_objectives(
+        good["per_seed"], bad["per_seed"], sigma_gate=sigma_gate, rel_gate=rel_gate
+    )
+    return {"good": good, "bad": bad, **gate}
 
 
 def evaluate_candidate(
