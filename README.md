@@ -98,6 +98,8 @@ $$ y = x(W_{slow} + \underbrace{W_{fast} + \text{Hebb}(x, y)}_{\text{The Scratch
 *   **Merge** ("bankruptcy"): persistently low-health experts are merged into stronger neighbors.
 *   **Split** ("IPO"): high-health experts clone into weak slots.
 
+These events are **function-preserving** (Net2Net / firefly, `sm_function_preserving=1`, default on): a split makes the destination an exact clone of the parent and gives both a `-ln2` routing-logit bias, so the twins jointly reproduce the parent's routing mass (each fires with half the gate) while antisymmetric `fc1` noise lets them diverge under SGD. In the **dense** regime (`top_k == num_experts`) the model output is unchanged at the event; in sparse top-k the discontinuity is sharply reduced (≈10–40× gentler than the legacy noisy clone in tests) but not zero, since moving a twin pair across the top-k boundary is inherently discrete. Set `sm_function_preserving=0` for the legacy noisy-clone behavior.
+
 When `use_neuroscore` is enabled, NeuroScore fitness (below) is blended into that health signal so credit assignment — not just utilization × energy — drives these decisions.
 
 **The Effect**: **Neural Architecture Search**. The model starts small and *grows* capacity exactly where the data complexity demands it.

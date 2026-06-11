@@ -17,6 +17,7 @@
 #   ctrl = SplitMergeController(model, SplitMergeConfig(...))
 #   ctrl.step(global_step, optimizer=opt)    # call periodically (e.g. every 50k steps)
 
+import math
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Iterable, Any, cast
 from bio_inspired_nanochat.torch_imports import torch, nn, Tensor
@@ -57,6 +58,26 @@ class SplitMergeConfig:
     clone_noise_linear: float = 0.02  # noise scale for linear weights
     clone_noise_router: float = 0.01  # noise scale for router columns
     clone_noise_embed: float = 0.05  # noise scale (tangent) for router embedding
+    # FUNCTION-PRESERVING lifecycle (uta.3 — Net2Net / firefly). When True (default),
+    # split/merge are constructed so the model's OUTPUT does not jump at the event:
+    #   • SPLIT: the destination slot becomes an EXACT clone of the parent (weights, router
+    #     row, genome Xi, embedding, metabolic & synaptic state). The parent and the clone
+    #     each receive a -ln2 additive routing-logit bias, so together they reproduce the
+    #     parent's original routing probability mass (each twin fires with half the gate) —
+    #     exactly output-preserving in the dense regime. Antisymmetric noise on the parent's
+    #     and child's fc1 (parent -= δ, child += δ) breaks the symmetry so they diverge under
+    #     SGD while the first-order (mean) function is preserved at the event.
+    #   • MERGE: the loser is weight-averaged into the winner; the winner takes +ln2 routing
+    #     bias to absorb the loser's mass; then the freed loser slot is re-seeded as a
+    #     function-preserving split of the merged winner — so the combined contribution is
+    #     unchanged and the slot becomes fresh capacity that re-diverges.
+    # When False, the legacy noisy-clone split / blend-and-overwrite merge is used (kept for
+    # back-compat and as the discontinuous baseline the continuity tests compare against).
+    function_preserving: bool = True
+    # Per-twin additive routing-logit reduction; ln2 makes a pair share the parent's mass.
+    gate_split_bias: float = math.log(2.0)
+    # Antisymmetric fc1 divergence noise for function-preserving split (parent -= δ, child += δ).
+    fp_divergence_noise: float = 0.02
     # Scheduling
     min_step_interval: int = 10_000  # don't do anything more frequently than this
     warmup_steps: int = 20_000  # no changes until after warmup
@@ -322,6 +343,127 @@ def _clone_linear_from_(dst: SynapticLinear, src: SynapticLinear, noise_scale: f
         cast(Tensor, dst.v_buf).zero_()
 
 
+# ---------------------------------------------------------------------------
+# Function-preserving lifecycle (uta.3 — Net2Net / firefly)
+# ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def _avg_linear_into_(winner: SynapticLinear, loser: SynapticLinear, alpha: float):
+    """winner <- alpha*winner + (1-alpha)*loser (weights + synaptic state). No clone-back."""
+    winner.w_slow.mul_(alpha).add_((1.0 - alpha) * loser.w_slow)
+    if (winner.w_fast is not None) and (loser.w_fast is not None):
+        winner.w_fast.mul_(alpha).add_((1.0 - alpha) * loser.w_fast)
+    if (winner.bias is not None) and (loser.bias is not None):
+        cast(Tensor, winner.bias).mul_(alpha).add_((1.0 - alpha) * cast(Tensor, loser.bias))
+    if (winner.post is not None) and (loser.post is not None):
+        for name in ("U", "V", "fast", "slow", "camkii", "pp1", "bdnf"):
+            wt = getattr(winner.post, name, None)
+            lt = getattr(loser.post, name, None)
+            if wt is not None and lt is not None:
+                cast(Tensor, wt).mul_(alpha).add_((1.0 - alpha) * cast(Tensor, lt))
+    if (winner.u_buf is not None) and (loser.u_buf is not None):
+        cast(Tensor, winner.u_buf).mul_(alpha).add_((1.0 - alpha) * cast(Tensor, loser.u_buf))
+    if (winner.v_buf is not None) and (loser.v_buf is not None):
+        cast(Tensor, winner.v_buf).mul_(alpha).add_((1.0 - alpha) * cast(Tensor, loser.v_buf))
+
+
+@torch.no_grad()
+def _antisym_perturb_fc1_(parent_lin: SynapticLinear, child_lin: SynapticLinear, scale: float):
+    """Antisymmetric perturbation: parent -= δ, child += δ on fc1 weights.
+
+    Assumes the child currently equals the parent (an exact clone). The pair then straddles
+    the original weights symmetrically, so the mean function is preserved to first order
+    (0.5·f(W-δ) + 0.5·f(W+δ) ≈ f(W)) while the asymmetry lets them diverge under SGD.
+
+    ``scale`` is RELATIVE to the per-tensor weight RMS, so "0.02" means a 2% divergence
+    regardless of the absolute weight magnitude. Using an absolute scale would be catastrophic
+    on freshly-initialized weights (std ≈ 0.02): a 0.02 absolute kick is then a ~100%
+    perturbation that destroys the function-preservation the gate split buys.
+    """
+    if scale <= 0:
+        return
+
+    def _rms(t: Tensor) -> float:
+        return float(t.detach().pow(2).mean().clamp_min(1e-24).sqrt().item())
+
+    d = torch.randn_like(parent_lin.w_slow) * (scale * _rms(parent_lin.w_slow))
+    parent_lin.w_slow.sub_(d)
+    child_lin.w_slow.add_(d)
+    if (parent_lin.w_fast is not None) and (child_lin.w_fast is not None):
+        df = torch.randn_like(parent_lin.w_fast) * (scale * _rms(parent_lin.w_fast))
+        parent_lin.w_fast.sub_(df)
+        child_lin.w_fast.add_(df)
+
+
+@torch.no_grad()
+def _copy_expert_full_(layer: SynapticMoE, dst_idx: int, src_idx: int):
+    """Make expert ``dst_idx`` an EXACT clone of ``src_idx``: weights + synaptic state +
+    router row + genome Xi + router embedding + metabolic state + routing bias. After this,
+    dst computes the identical function AND routes identically to src."""
+    _copy_synaptic_linear_(layer.experts[dst_idx].fc1, layer.experts[src_idx].fc1)
+    _copy_synaptic_linear_(layer.experts[dst_idx].fc2, layer.experts[src_idx].fc2)
+    W = layer.router.weight
+    W[dst_idx].copy_(W[src_idx])
+    Xi = cast(Tensor, layer.Xi)
+    Xi[dst_idx].copy_(Xi[src_idx])
+    emb = layer.router_embeddings
+    emb[dst_idx].copy_(emb[src_idx])
+    fatigue = cast(Tensor, layer.fatigue)
+    energy = cast(Tensor, layer.energy)
+    fatigue[dst_idx] = fatigue[src_idx]
+    energy[dst_idx] = energy[src_idx]
+    rb = cast(Tensor, layer.router_logit_bias)
+    rb[dst_idx] = rb[src_idx]
+
+
+@torch.no_grad()
+def _function_preserving_split_(
+    layer: SynapticMoE, parent_idx: int, dst_idx: int, cfg: SplitMergeConfig
+):
+    """Split parent into (parent, child@dst_idx) without changing the model output.
+
+    The child is an exact clone of the parent; both then receive a -ln2 routing-logit bias so
+    together they reproduce the parent's original routing probability mass (each fires with
+    half the gate). Antisymmetric fc1 noise makes them diverge under SGD. In the dense routing
+    regime this is exactly output-preserving at the event; in sparse top-k it sharply reduces
+    (but does not zero) the discontinuity vs. the legacy noisy clone.
+    """
+    _copy_expert_full_(layer, dst_idx, parent_idx)
+    rb = cast(Tensor, layer.router_logit_bias)
+    rb[parent_idx] = rb[parent_idx] - cfg.gate_split_bias
+    rb[dst_idx] = rb[parent_idx]
+    _antisym_perturb_fc1_(
+        layer.experts[parent_idx].fc1, layer.experts[dst_idx].fc1, cfg.fp_divergence_noise
+    )
+
+
+@torch.no_grad()
+def _function_preserving_merge_(
+    layer: SynapticMoE, winner_idx: int, loser_idx: int, alpha: float, cfg: SplitMergeConfig
+):
+    """Merge loser into winner without changing the model output.
+
+    The loser is weight-averaged into the winner (routing identity included); the winner takes
+    +ln2 routing bias to absorb the loser's probability mass; then the freed loser slot is
+    re-seeded as a function-preserving split of the merged winner. The +ln2 (absorb) and the
+    split's -ln2 cancel, so both slots end at the winner's pre-merge bias and the combined
+    contribution of the pair equals the pre-merge winner+loser contribution (exact for similar
+    experts — which the merge criteria already require via high embedding cosine similarity).
+    """
+    _avg_linear_into_(layer.experts[winner_idx].fc1, layer.experts[loser_idx].fc1, alpha)
+    _avg_linear_into_(layer.experts[winner_idx].fc2, layer.experts[loser_idx].fc2, alpha)
+    W = layer.router.weight
+    W[winner_idx].mul_(alpha).add_((1.0 - alpha) * W[loser_idx])
+    Xi = cast(Tensor, layer.Xi)
+    Xi[winner_idx].mul_(alpha).add_((1.0 - alpha) * Xi[loser_idx])
+    emb = layer.router_embeddings
+    emb[winner_idx].mul_(alpha).add_((1.0 - alpha) * emb[loser_idx])
+    rb = cast(Tensor, layer.router_logit_bias)
+    rb[winner_idx] = rb[winner_idx] + cfg.gate_split_bias
+    _function_preserving_split_(layer, winner_idx, loser_idx, cfg)
+
+
 @torch.no_grad()
 def _merge_expert_into_and_clone_(
     layer: SynapticMoE,
@@ -513,36 +655,41 @@ class SplitMergeController:
         optimizer: OptimizersArg,
         step: int,
     ):
+        W = layer.router.weight
         for src, dst in zip(sources, slots):
             if src == dst:
                 continue
-            # Clone src → dst, with noise & embedding tweak
-            _clone_linear_from_(
-                layer.experts[dst].fc1,
-                layer.experts[src].fc1,
-                self.cfg.clone_noise_linear,
-            )
-            _clone_linear_from_(
-                layer.experts[dst].fc2,
-                layer.experts[src].fc2,
-                self.cfg.clone_noise_linear,
-            )
-            # router weight row (expert row)
-            W = layer.router.weight
-            W[dst].copy_(W[src])
-            _add_noise_(W[dst], self.cfg.clone_noise_router)
-            # embedding
-            layer.router_embeddings[dst : dst + 1].copy_(
-                _orthogonal_perturb_like(
-                    layer.router_embeddings[src : src + 1].clone(),
-                    self.cfg.clone_noise_embed,
+            if self.cfg.function_preserving:
+                # Net2Net / firefly: dst becomes a -ln2-gated twin of the parent so the model
+                # output does not jump; antisymmetric fc1 noise lets the pair diverge.
+                _function_preserving_split_(layer, src, dst, self.cfg)
+            else:
+                # Legacy: clone src → dst with noise & embedding tweak (discontinuous).
+                _clone_linear_from_(
+                    layer.experts[dst].fc1,
+                    layer.experts[src].fc1,
+                    self.cfg.clone_noise_linear,
                 )
-            )
-            # reset stats
-            fatigue = cast(Tensor, layer.fatigue)
-            energy = cast(Tensor, layer.energy)
-            fatigue[dst] = 0.0
-            energy[dst] = 1.0
+                _clone_linear_from_(
+                    layer.experts[dst].fc2,
+                    layer.experts[src].fc2,
+                    self.cfg.clone_noise_linear,
+                )
+                # router weight row (expert row)
+                W[dst].copy_(W[src])
+                _add_noise_(W[dst], self.cfg.clone_noise_router)
+                # embedding
+                layer.router_embeddings[dst : dst + 1].copy_(
+                    _orthogonal_perturb_like(
+                        layer.router_embeddings[src : src + 1].clone(),
+                        self.cfg.clone_noise_embed,
+                    )
+                )
+                # reset stats
+                fatigue = cast(Tensor, layer.fatigue)
+                energy = cast(Tensor, layer.energy)
+                fatigue[dst] = 0.0
+                energy[dst] = 1.0
             # emit lineage event: split parent src -> child dst
             if self.logger is not None and hasattr(self.logger, "on_split"):
                 try:
@@ -552,14 +699,19 @@ class SplitMergeController:
                 except Exception as _e:
                     if self.cfg.verbose:
                         print(f"[SplitMerge] logger.on_split failed: {_e}")
-            # zero optimizer moments
+            # zero optimizer moments for every parameter the event overwrote. The
+            # function-preserving path ALSO nudges the parent's fc1 (antisymmetric noise) and
+            # the genome Xi, so include both experts' fc1 + Xi alongside dst's weights.
             if optimizer is not None:
                 changed = [
                     layer.experts[dst].fc1.w_slow,
                     layer.experts[dst].fc1.w_fast,
                     layer.experts[dst].fc2.w_slow,
                     layer.experts[dst].fc2.w_fast,
+                    layer.experts[src].fc1.w_slow,
+                    layer.experts[src].fc1.w_fast,
                     W,
+                    cast(Any, layer).Xi,
                 ]
                 if layer.experts[dst].fc1.bias is not None:
                     changed.append(layer.experts[dst].fc1.bias)
@@ -585,7 +737,10 @@ class SplitMergeController:
             else:
                 winner, loser = j, i
             alpha = self._util_weight(layer, winner, loser)
-            _merge_expert_into_and_clone_(layer, winner, loser, alpha, self.cfg)
+            if self.cfg.function_preserving:
+                _function_preserving_merge_(layer, winner, loser, alpha, self.cfg)
+            else:
+                _merge_expert_into_and_clone_(layer, winner, loser, alpha, self.cfg)
             # emit lineage event: merge parents (winner,loser) -> child lives at index loser (clone slot reused)
             if self.logger is not None and hasattr(self.logger, "on_merge"):
                 try:
@@ -611,6 +766,7 @@ class SplitMergeController:
                     layer.experts[loser].fc2.w_slow,
                     layer.experts[loser].fc2.w_fast,
                     layer.router.weight,
+                    cast(Any, layer).Xi,
                 ]
                 if layer.experts[winner].fc1.bias is not None:
                     changed.append(layer.experts[winner].fc1.bias)

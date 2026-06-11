@@ -328,6 +328,9 @@ def test_splitmerge_resets_dead_expert():
     cfg = SynapticConfig(enable_hebbian=False, enable_metabolism=True)
     moe = SynapticMoE(n_embd=8, num_experts=2, top_k=1, hidden_mult=1, cfg=cfg, dropout=0.0)
 
+    # Legacy clone-and-reset contract (function_preserving=False). The function-preserving
+    # default is covered separately in tests/test_function_preserving_splitmerge.py, where the
+    # reset twin INHERITS the parent's metabolic state instead of resetting it to 0/1.
     sm_cfg = SplitMergeConfig(
         enabled=True,
         warmup_steps=0,
@@ -337,6 +340,7 @@ def test_splitmerge_resets_dead_expert():
         reset_health_max=0.05,
         resets_per_call=1,
         ddp_broadcast=False,
+        function_preserving=False,
     )
     ctrl = SplitMergeController(moe, sm_cfg)
 
@@ -371,6 +375,7 @@ def test_splitmerge_splits_clone_router_row():
         clone_noise_router=0.0,
         clone_noise_embed=0.0,
         ddp_broadcast=False,
+        function_preserving=False,  # legacy clone-and-reset contract (see FP test file)
     )
     ctrl = SplitMergeController(moe, sm_cfg)
 
@@ -413,6 +418,7 @@ def test_splitmerge_merges_clones_router_row():
         clone_noise_router=0.0,
         clone_noise_embed=0.0,
         ddp_broadcast=False,
+        function_preserving=False,  # legacy clone-and-reset contract (see FP test file)
     )
     ctrl = SplitMergeController(moe, sm_cfg)
 

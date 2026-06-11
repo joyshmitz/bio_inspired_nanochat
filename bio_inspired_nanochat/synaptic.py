@@ -1452,6 +1452,13 @@ class SynapticMoE(nn.Module):
         self.router_probe = nn.Linear(n_embd, cfg.router_embed_dim, bias=False)
         self.register_buffer("fatigue", torch.zeros(num_experts))
         self.register_buffer("energy", torch.ones(num_experts))
+        # Per-expert additive routing-logit bias (uta.3). Zero by default => no behavior
+        # change. The function-preserving split/merge controller writes -ln2 / +ln2 offsets
+        # here so a freshly-split twin pair shares the parent's routing probability mass
+        # (each twin gets half), making the lifecycle event exactly output-preserving in the
+        # dense regime instead of a discontinuous noisy-clone jump. It is the same per-expert
+        # logit bias used by auxiliary-loss-free load balancing, so it is reusable for that.
+        self.register_buffer("router_logit_bias", torch.zeros(num_experts))
         # Router embeddings (biological identity) with unit-norm constraint
         emb = torch.randn(num_experts, cfg.router_embed_dim)
         emb = emb / (emb.norm(dim=-1, keepdim=True) + 1e-8)
@@ -1467,6 +1474,15 @@ class SynapticMoE(nn.Module):
         # Molecular Genetics: Xi (The Genome)
         self.Xi = nn.Parameter(torch.zeros(num_experts, cfg.xi_dim))
         nn.init.normal_(self.Xi, std=0.1)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Backward compat (uta.3): checkpoints predating router_logit_bias lack this key.
+        # Inject the (zero) default so strict=True loads of old checkpoints don't fail —
+        # zero bias reproduces the original routing exactly.
+        key = prefix + "router_logit_bias"
+        if key not in state_dict:
+            state_dict[key] = self.router_logit_bias.detach().clone()
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def _get_phenotype(self, xi: Tensor) -> Tensor:
         """Map Xi logits to biological range constants."""
@@ -1502,6 +1518,10 @@ class SynapticMoE(nn.Module):
         gene_bias = 0.05 * (alpha_energy - alpha_fatigue).view(1, 1, E)
 
         logits = logits + gene_bias + bias
+
+        # uta.3: per-expert routing bias (zero by default). Carries the function-preserving
+        # gate split (-ln2 on a twin pair) so lifecycle events don't perturb the output.
+        logits = logits + self.router_logit_bias.view(1, 1, E)
 
         if self.cfg.enable_metabolism:
             logits = logits + 0.1 * energy_buf.view(1, 1, E) - 0.1 * fatigue_buf.view(1, 1, E)
