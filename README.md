@@ -15,17 +15,18 @@ Standard LLMs are "frozen crystals"—static matrices of `float16` numbers that 
 This is an **active research project** implementing 11+ bio-inspired mechanisms with systematic evaluation and optimization. See our comprehensive planning documents:
 
 - 📋 [**Full Roadmap**](.beads/) - 69 tasks across 7 epics (Beads tracker)
-- 🧬 [**CMA-ES Optimization Plan**](PLAN_TO_USE_CMAES_FOR_HYPERPARAMETER_EXPLORATION_AND_OPTIMIZATION_ACROSS_ALL_BIO_INSPIRED_FEATURES.md) - Systematic hyperparameter tuning for 48 parameters
+- 🧬 [**CMA-ES Optimization Plan**](PLAN_TO_USE_CMAES_FOR_HYPERPARAMETER_EXPLORATION_AND_OPTIMIZATION_ACROSS_ALL_BIO_INSPIRED_FEATURES.md) - Systematic hyperparameter tuning (10 params wired in Phase 1; ~48 planned across two phases)
 - 🎯 [**Feature Predictions**](CLAUDE_SONNET45_PREDICTIONS_ON_WHICH_NEW_BIO_INSPIRED_IDEAS_WILL_WORK_BEST_OR_NOT.md) - Evidence-based analysis of which mechanisms will work
 - 🚀 [**New Features Roadmap**](NEW_RADICALLY_NEW_BIO_INSPIRED_FEATURES_TO_ADD_IN_MODULAR_WAY.md) - Detailed specs for upcoming mechanisms
 
 **Implementation Status:**
-- ✅ **Core Synaptic Mechanisms** (Presynaptic, Postsynaptic, Structural) - Fully implemented
-- ✅ **Triton GPU Kernels** - 375-line fused presynaptic kernel
-- ✅ **Rust CPU Kernels** - PyO3-based native implementation (50-90% complete)
-- 🚧 **Extended Bio Features** - Stochastic release, BDNF, dual weights (in progress)
-- 🚧 **Systematic Optimization** - CMA-ES framework for 48 hyperparameters (planned)
-- 🚧 **Rigorous Evaluation** - Bio vs vanilla benchmarks with statistical testing (planned)
+Status legend: ✅ shipping (on the live model path, tested) · 🚧 partial/landing · 🔮 aspirational (roadmap).
+
+- ✅ **Core Synaptic Mechanisms** — presynaptic release (faithful Hill dynamics), online Hebbian fast-weights, and the structural MoE lifecycle all run on the live path.
+- ✅ **Stochastic release · BDNF metaplasticity · dual fast/slow weights** — implemented and toggleable.
+- 🚧 **Triton GPU & Rust CPU kernels** — both exist as landing targets that must match the golden reference (`tests/test_presyn_golden.py`), but the live path is pure PyTorch (`release_canonical`); kernel dispatch is not yet wired (`jyb.*`).
+- 🚧 **Systematic Optimization** — CMA-ES Phase 1 (the 10 most influential params) is wired; the broader ~48-param two-phase search is planned.
+- 🔮 **Rigorous Evaluation** — bio-vs-vanilla benchmark matrix with statistical testing (roadmap).
 
 ---
 
@@ -38,8 +39,8 @@ This is an **active research project** implementing 11+ bio-inspired mechanisms 
 | **Diversity** | 🎲 **Randomness**: Temperature sampling. | 🔋 **Metabolism**: Synapses "tire out", forcing new paths. |
 | **Capacity** | 🏗️ **Fixed**: Pre-allocated size (e.g., 32 layers). | 🏙️ **Elastic**: Experts multiply/die based on demand. |
 | **Learning** | 🏫 **Offline**: Only learns during Backprop. | ⚡ **Online**: "Learns" context via Hebbian consolidation. |
-| **Optimization** | 🎯 **Grid Search**: Manual hyperparameter tuning. | 🧬 **Evolution**: CMA-ES optimizes 48 parameters systematically. |
-| **Kernels** | 🐍 **Python/CUDA**: Single backend. | ⚡ **Multi-Backend**: Triton GPU + Rust CPU + Python reference. |
+| **Optimization** | 🎯 **Grid Search**: Manual hyperparameter tuning. | 🧬 **Evolution**: CMA-ES tunes the bio parameters (10 wired in Phase 1). |
+| **Kernels** | 🐍 **Python/CUDA**: Single backend. | ⚡ **Reference + landing kernels**: pure-PyTorch live path; Triton GPU + Rust CPU kernels golden-tested. |
 
 ---
 
@@ -56,10 +57,9 @@ We map specific cellular mechanisms from the [Synaptic Cleft](https://en.wikiped
 
 **The Effect**: A physically-grounded **frequency penalty**. The model literally *cannot* attend to the same token endlessly. It gets "bored" (depleted) and naturally shifts focus to novel information.
 
-**Implementation**: Three backends for production use:
-- **Triton GPU Kernel** (`bio_inspired_nanochat/kernels/presyn_fused.py`): 375-line fused kernel, 3 passes over attention
-- **Rust CPU Kernel** (`rust_src/src/presyn.rs`): PyO3-native implementation for CPU inference
-- **Python Reference** (`tests/test_rust_kernels.py`): 130-line pure Python for validation
+**Implementation**: the live model path is `SynapticPresyn.release_canonical` (pure PyTorch, differentiable, golden-locked in `tests/test_presyn_golden.py`). Two kernel backends exist as landing targets that must match that golden, but are **not yet on the live dispatch path** (`jyb.*`):
+- **Triton GPU Kernel** (`bio_inspired_nanochat/kernels/presyn_fused.py`): 375-line fused kernel.
+- **Rust CPU Kernel** (`rust_src/src/presyn.rs`): PyO3-native implementation.
 
 ```mermaid
 graph LR
@@ -82,21 +82,23 @@ $$ y = x(W_{slow} + \underbrace{W_{fast} + \text{Hebb}(x, y)}_{\text{The Scratch
 
 **The Effect**: **Infinite local context**. The model can define a variable at the start of a sentence and "remember" it at the end via the fast weights, without needing to attend back to it.
 
-**New Mechanisms** (in progress):
-- **BDNF Metaplasticity**: Activity-dependent learning rate modulation (90% implemented!)
-- **CaMKII/PP1 Bistable Latch**: Hysteretic consolidation gate with self-excitation
-- **Dual-Weight Differentiation**: Separate timescales for fast cache vs slow storage
+**Mechanisms**:
+- ✅ **BDNF Metaplasticity**: activity-dependent learning-rate modulation — implemented and toggleable (`bdnf_gamma`).
+- ✅ **Dual-Weight Differentiation**: separate fast-cache vs slow-storage timescales (`W_fast` / `W_slow`).
+- 🔮 **CaMKII/PP1 Bistable Latch** (roadmap, `sax.2`): consolidation today opens on a CaMKII *threshold* gate (`σ(CaMKII − 0.5) − 0.3`); a true bistable latch with hysteresis/self-excitation, and folding PP1 into the gate, are planned.
 
 ### 3. Structural Plasticity (The Life Cycle)
 *The mechanism of "Economy & Efficiency"*
 
 **The Biology**: The brain is a ruthlessly efficient economy. It doesn't keep billions of idle neurons on payroll. Useful regions get more resources (Neurogenesis); idle regions are demolished (Pruning).
 
-**The Math**: A **Synaptic Mixture-of-Experts (MoE)** where experts have a "Bank Account" (Energy).
-*   **Taxation**: Every forward pass costs Energy.
-*   **Income**: Being routed to earns Energy.
-*   **Bankruptcy**: Experts with $E \approx 0$ are killed (Merged).
-*   **IPO**: Wealthy, overworked experts clone themselves (Split).
+**The Math**: A **Synaptic Mixture-of-Experts (MoE)** with a per-expert **energy metabolism** and a **health-based lifecycle** (health = utilization × energy). The "bank-account" framing below is a metaphor for these real mechanisms (there is no literal accounting/`bankruptcy`/`IPO` code):
+*   **Energy cost** ("taxation"): firing draws down an expert's energy (`energy_use`); idling lets it refill (`energy_fill`).
+*   **Utilization** ("income"): being routed raises utilization, which feeds the health score.
+*   **Merge** ("bankruptcy"): persistently low-health experts are merged into stronger neighbors.
+*   **Split** ("IPO"): high-health experts clone into weak slots.
+
+When `use_neuroscore` is enabled, NeuroScore fitness (below) is blended into that health signal so credit assignment — not just utilization × energy — drives these decisions.
 
 **The Effect**: **Neural Architecture Search**. The model starts small and *grows* capacity exactly where the data complexity demands it.
 
@@ -178,12 +180,12 @@ $$ RRP_{t+1} = RRP_t - R_t + \text{RefillRate} $$
 
 The released signal is then scaled by an energy-gated AMPA amplitude $q = \sigma(\beta_q (E - 0.5)) \cdot q_{max}$ and biased by a septin-like distance barrier. This non-linear depletion is what physically enforces the frequency penalty.
 
-### 4. Hebbian Learning (The Fast Weight)
-The postsynaptic weight update follows a gated Hebbian rule. We maintain low-rank eligibility traces $U, V$.
+### 4. Hebbian Learning (Fast Weights + Gated Consolidation)
+Low-rank eligibility traces $U, V$ accumulate co-activity each step. Fast weights decay and absorb the trace (the short-term scratchpad). Consolidation into the slow weights is gated by CaMKII and modulated by BDNF metaplasticity:
 
-$$ \Delta W_{fast} = \eta \cdot (U \cdot V^T) \cdot \underbrace{\sigma(\text{CaMKII} - \text{PP1})}_{\text{Consolidation Gate}} $$
+$$ \Delta W_{slow} = \eta_{slow}\,(1 + \gamma\,\text{BDNF})\,\overline{U V^{T}}\;\cdot\;\underbrace{\big(\sigma(\text{CaMKII} - 0.5) - 0.3\big)}_{\text{CaMKII threshold gate}} $$
 
-The gate opens only when CaMKII (Write signal) > PP1 (Erase signal).
+The gate opens as CaMKII rises past its threshold. **Note:** PP1 is tracked as the opposing "erase" signal but is **not** in the live gate — the gate is a CaMKII threshold, not a $\sigma(\text{CaMKII}-\text{PP1})$ latch. A true bistable CaMKII–PP1 consolidation latch is the `sax.2` roadmap item.
 
 ### 5. NeuroScore Dynamics (The Credit Assignment)
 In `neuroscore.py`, we calculate the evolutionary fitness of each expert using three metrics:
@@ -195,13 +197,13 @@ In `neuroscore.py`, we calculate the evolutionary fitness of each expert using t
 *   **Resilience**: Stability of the expert's contribution over time (inverse variance).
     $$ \text{Res}_i = \frac{1}{\text{Var}(\text{Contribution}_i) + \epsilon} $$
 
-Experts with high NeuroScores are cloned (Split); those with low scores are cannibalized (Merge).
+When `use_neuroscore` is enabled (default-off), these three metrics are combined into a per-expert fitness that is blended into the health signal driving Split / Merge / Reset (`de5l`). With it off, the lifecycle uses utilization × energy alone and NeuroScore is an observability metric.
 
 ---
 
 ## 🧬 Evolution in Silicon: Systematic Hyperparameter Optimization
 
-Manually tuning **48 interacting biological hyperparameters** (time constants, enzyme affinities, energy costs) is intractable for humans. We employ **CMA-ES (Covariance Matrix Adaptation Evolution Strategy)** for systematic, derivative-free optimization.
+Manually tuning dozens of interacting biological hyperparameters (time constants, enzyme affinities, energy costs) is intractable for humans. We employ **CMA-ES (Covariance Matrix Adaptation Evolution Strategy)** for systematic, derivative-free optimization. **Status:** Phase 1 (the 10 most influential params) is wired today; the broader subgroup design below — and the ~48-parameter figure — is the *plan*, not shipping code. `SynapticConfig` exposes 70 hyperparameters total (see [`docs/parameter_census.md`](docs/parameter_census.md)).
 
 ### The Challenge
 
@@ -277,26 +279,21 @@ This will:
 
 ## ⚡ High-Performance Multi-Backend Architecture
 
-Bio-Inspired Nanochat is optimized for **dual RTX 4090** training/inference with three kernel backends:
+Bio-Inspired Nanochat targets **dual RTX 4090** training/inference. The live presynaptic path is pure PyTorch today; two native kernels exist as landing targets that must match the golden reference (`tests/test_presyn_golden.py`) before they go live (`jyb.*`).
 
 ### Kernel Backends
 
-1. **Triton GPU Kernels** (Production)
+1. **Python reference / live path** ✅
+   - `SynapticPresyn.release_canonical` — the differentiable, golden-locked dynamics the model actually runs.
+
+2. **Triton GPU Kernel** 🚧 (landing — not yet dispatched on the live path)
    - Location: `bio_inspired_nanochat/kernels/presyn_fused.py`
    - 375-line fused presynaptic dynamics kernel
-   - 3 passes over attention (optimization opportunity identified)
-   - FlexAttention compatibility for O(N) memory vs O(N²)
+   - Written against the reference `forward()`; must be re-targeted to the canonical top-k path (`jyb.2`).
 
-2. **Rust CPU Kernels** (Production)
+3. **Rust CPU Kernel** 🚧 (landing — not yet dispatched on the live path)
    - Location: `rust_src/src/presyn.rs`, `rust_src/src/moe.rs`
-   - PyO3-based native extensions
-   - Type-safe with explicit dimensionality checks
-   - Fallback for CPU-only deployment
-
-3. **Python Reference** (Validation)
-   - Location: `tests/test_rust_kernels.py::presyn_step_python_ref`
-   - 130-line pure implementation
-   - Used for kernel correctness testing
+   - PyO3-based native extensions; build requires `maturin develop`.
 
 ### Performance Optimizations (In Progress)
 
@@ -535,7 +532,7 @@ uv run scripts/base_eval.py
 ## 📂 Anatomy of the Codebase
 
 ### Core Implementation
-*   **`bio_inspired_nanochat/synaptic.py`** ⚡ **The Physics Engine**: 48-parameter `SynapticConfig` + core dynamics
+*   **`bio_inspired_nanochat/synaptic.py`** ⚡ **The Physics Engine**: 70-parameter `SynapticConfig` + core dynamics
 *   **`bio_inspired_nanochat/gpt_synaptic.py`** 🏗️ **The Body**: Transformer skeleton with synaptic organs
 *   **`bio_inspired_nanochat/synaptic_splitmerge.py`** 👼 **The God Hand**: Surgical controller for expert lifecycle
 *   **`bio_inspired_nanochat/neuroscore.py`** 🏆 **The Credit Score**: Expert fitness metrics (Efficiency, Specialization, Resilience)
@@ -575,7 +572,7 @@ uv run scripts/base_eval.py
    - Goal: Modular, toggleable bio mechanisms for clean ablation studies
 
 2. **CMA-ES Hyperparameter Optimization** (10 tasks, P1)
-   - Systematic optimization of 48 parameters across 2 phases
+   - Systematic optimization across 2 phases (Phase 1's 10 params wired; ~48 planned)
    - Goal: Discover optimal bio configs for different model scales
 
 3. **Bio vs Vanilla Evaluation** (5 tasks, P1)
