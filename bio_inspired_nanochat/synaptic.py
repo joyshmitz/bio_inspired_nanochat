@@ -489,6 +489,34 @@ def _softplus_inv(y: float) -> float:
 _ABUF_MAX = 0.5
 
 
+def cb_spectral_radius(
+    rho_c: Tensor, rho_b: Tensor, alpha_buf_on: Tensor, alpha_buf_off: Tensor, beta: Tensor
+) -> Tensor:
+    """Spectral radius of the calcium↔buffer 2×2 linear transition matrix (yw9.7).
+
+    Freezing the bilinear coupling coefficient β = (1−BUF) ∈ [0,1], the C/BUF update is linear:
+
+        M(β) = [[ ρc − αon·β ,      αoff        ],
+                [   αon·β     ,  ρb − αoff      ]]
+
+    Closed-form 2×2 spectral radius (no eig decomposition, so it's differentiable and broadcasts):
+    real eigenvalues ⇒ max(|tr ± √Δ|)/2;  complex pair (Δ<0) ⇒ √det. Contraction ⟺ ρ(M) < 1.
+    All inputs broadcast against ``beta``. See docs/stable_recurrence_theory.md.
+    """
+    a = rho_c - alpha_buf_on * beta
+    d = rho_b - alpha_buf_off
+    b = alpha_buf_off
+    c = alpha_buf_on * beta
+    tr = a + d
+    det = a * d - b * c
+    disc = tr * tr - 4.0 * det
+    real = disc >= 0
+    sqrt_disc = torch.sqrt(disc.clamp(min=0.0))
+    rho_real = torch.maximum((tr + sqrt_disc).abs(), (tr - sqrt_disc).abs()) * 0.5
+    rho_complex = torch.sqrt(det.clamp(min=0.0))  # |λ| = √det for a complex-conjugate pair
+    return torch.where(real, rho_real, rho_complex)
+
+
 class LearnableKinetics(nn.Module):
     """Stability-preserving, SGD-learnable presynaptic calcium/buffer kinetics (yw9.3).
 
@@ -539,6 +567,19 @@ class LearnableKinetics(nn.Module):
             "alpha_buf_on": float(self.alpha_buf_on),
             "alpha_buf_off": float(self.alpha_buf_off),
         }
+
+    def spectral_radius(self, n_beta: int = 21) -> Tensor:
+        """Worst-case spectral radius of the C↔BUF linear transition over BUF∈[0,1] (yw9.7).
+
+        The calcium/buffer subsystem is contractive (cannot blow up) iff this is < 1. It is
+        differentiable in the kinetics, so it can be read as a telemetry/stability margin or used
+        as a soft penalty. See docs/stable_recurrence_theory.md for the derivation.
+        """
+        betas = torch.linspace(0.0, 1.0, n_beta, dtype=self.theta_rho_c.dtype)
+        rho = cb_spectral_radius(
+            self.rho_c, self.rho_b, self.alpha_buf_on, self.alpha_buf_off, betas
+        )
+        return rho.max()
 
 
 # -----------------------------------------------------------------------------
