@@ -185,7 +185,8 @@ class NeuroScore:
             return (x - lo) / rng
 
         comp = (_norm(efficiency) + _norm(specialization) + _norm(resilience)) / 3.0
-        return comp.clamp(0.0, 1.0)
+        # Never let a NaN/Inf metric leak into the lifecycle's health signal.
+        return torch.nan_to_num(comp, nan=0.5).clamp(0.0, 1.0)
 
     def _publish_score(self, module: nn.Module, st: Dict[str, Any]) -> None:
         """Write the composite fitness onto the MoE module (``last_neuroscore``) so the

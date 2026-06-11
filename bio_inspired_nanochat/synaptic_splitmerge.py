@@ -410,7 +410,7 @@ class SplitMergeController:
         if self.cfg.use_neuroscore:
             score = getattr(layer, "last_neuroscore", None)
             if score is not None and tuple(score.shape) == tuple(health.shape):
-                w = float(self.cfg.neuroscore_weight)
+                w = min(max(float(self.cfg.neuroscore_weight), 0.0), 1.0)
                 score = cast(Tensor, score).to(health.device, health.dtype).clamp(0, 1)
                 health = (1.0 - w) * health + w * score
         return health

@@ -118,18 +118,18 @@ None — every `SynapticConfig` field is read on some runtime path (invariant en
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `structural_interval` | `50000` | LIVE |  | bio_inspired_nanochat/synaptic.py:1567 |
-| `structural_tau_util` | `0.2` | LIVE |  | bio_inspired_nanochat/synaptic.py:1556 |
-| `structural_age_bias` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1566 |
+| `structural_interval` | `50000` | LIVE |  | bio_inspired_nanochat/synaptic.py:1572 |
+| `structural_tau_util` | `0.2` | LIVE |  | bio_inspired_nanochat/synaptic.py:1561 |
+| `structural_age_bias` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1571 |
 | `router_embed_dim` | `24` | LIVE |  | bio_inspired_nanochat/gpt_synaptic.py:480 |
-| `router_contrastive_lr` | `0.0001` | LIVE |  | bio_inspired_nanochat/synaptic.py:1530 |
-| `router_contrastive_push` | `0.1` | LIVE |  | bio_inspired_nanochat/synaptic.py:1526 |
+| `router_contrastive_lr` | `0.0001` | LIVE |  | bio_inspired_nanochat/synaptic.py:1529 |
+| `router_contrastive_push` | `0.1` | LIVE |  | bio_inspired_nanochat/synaptic.py:1529 |
 
 ### `genetics` (1/1 live)
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `xi_dim` | `4` | LIVE |  | bio_inspired_nanochat/synaptic.py:1411 |
+| `xi_dim` | `4` | LIVE |  | bio_inspired_nanochat/synaptic.py:1415 |
 
 ### `toggle` (4/4 live)
 
@@ -137,14 +137,14 @@ None — every `SynapticConfig` field is read on some runtime path (invariant en
 |---|---|---|---|---|
 | `enable_presyn` | `True` | LIVE |  | bio_inspired_nanochat/synaptic.py:338 |
 | `enable_hebbian` | `True` | LIVE |  | bio_inspired_nanochat/synaptic.py:826 |
-| `enable_metabolism` | `True` | LIVE |  | bio_inspired_nanochat/synaptic.py:1449 |
+| `enable_metabolism` | `True` | LIVE |  | bio_inspired_nanochat/synaptic.py:1453 |
 | `use_flex_attention` | `False` | LIVE |  | bio_inspired_nanochat/synaptic.py:1101 |
 
 ### `native_toggle` (1/1 live)
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `native_genetics` | `False` | LIVE |  | bio_inspired_nanochat/synaptic.py:1460 |
+| `native_genetics` | `False` | LIVE |  | bio_inspired_nanochat/synaptic.py:1464 |
 
 ---
 *Status = LIVE when read by a runtime module (`bio_inspired_nanochat/**` or the Rust kernel), DEAD otherwise. “Read at” shows the first runtime/Rust read site; full evidence is in the JSON.*

@@ -431,12 +431,33 @@ def render_markdown(census: dict[str, Any]) -> str:
     return "\n".join(out)
 
 
+def semantic_view(census: dict[str, Any]) -> dict[str, Any]:
+    """The drift-relevant content of a census, ignoring evidence line numbers (which
+    shift on any edit elsewhere in a file). ``--check`` compares this so CI fails only
+    on real changes — a field added, removed, or rewired LIVE<->DEAD — not on incidental
+    line moves. (``tests/test_param_census.py`` enforces the same invariants.)"""
+    return {
+        "field_count": census["field_count"],
+        "live_count": census["live_count"],
+        "dead_count": census["dead_count"],
+        "tuned_phase1_params": census["tuned_phase1_params"],
+        "fields": {
+            r["name"]: {
+                "subsystem": r["subsystem"],
+                "status": r["status"],
+                "tuned_phase1": r["tuned_phase1"],
+            }
+            for r in census["fields"]
+        },
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Generate the SynapticConfig census.")
     ap.add_argument(
         "--check",
         action="store_true",
-        help="Fail if committed docs/parameter_census.json is stale (CI).",
+        help="Fail if the committed census is semantically stale (CI).",
     )
     args = ap.parse_args()
 
@@ -446,11 +467,18 @@ def main() -> int:
     new_json = json.dumps(census, indent=2, ensure_ascii=False) + "\n"
 
     if args.check:
-        old = json_path.read_text(encoding="utf-8") if json_path.exists() else ""
-        if old != new_json:
+        if not json_path.exists():
             print(
-                "docs/parameter_census.json is stale; run "
+                "docs/parameter_census.json missing; run "
                 "`uv run python -m scripts.param_census`.",
+                file=sys.stderr,
+            )
+            return 1
+        committed = json.loads(json_path.read_text(encoding="utf-8"))
+        if semantic_view(committed) != semantic_view(census):
+            print(
+                "docs/parameter_census.json is stale (a field was added/removed or "
+                "changed LIVE/DEAD); run `uv run python -m scripts.param_census`.",
                 file=sys.stderr,
             )
             return 1
