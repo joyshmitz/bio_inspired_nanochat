@@ -153,6 +153,12 @@ class SynapticConfig:
     # (The legacy 0.85 was a RAW retention multiplier; under the unified exp form that would be a
     # ~0.6-step half-life and near-inert plasticity. 8j9.2/x6z4; confirm final value via 4fw.)
     tau_c: float = 6.0
+    # yw9.3: promote the calcium/buffer kinetics (tau_c, tau_buf, alpha_ca, alpha_buf_on/off) from
+    # fixed hyperparameters to SGD-LEARNED Parameters (LearnableKinetics), reached through the
+    # differentiable recurrence (yw9.2). Stability-preserving by construction (sigmoid decays,
+    # softplus gains, bounded buffer coupling) so learning can't destabilize. DEFAULT-OFF: the
+    # cfg constants below are used unchanged unless this is set.
+    learnable_kinetics: bool = False
     # (or4t: alpha_c / syt1_slope / syt7_slope / cpx_thresh were the LEGACY sigmoid release-prob
     #  params; removed as dead after the canonical migration. The canonical uses alpha_ca for the
     #  calcium influx and Hill syt_fast_kd/syt_slow_kd + complexin_bias for the release prob.)
@@ -465,6 +471,76 @@ def chunked_recurrence(
     return outs
 
 
+def _logit(p: float) -> float:
+    """Inverse sigmoid: θ such that sigmoid(θ) = p, for p ∈ (0,1)."""
+    p = min(max(p, 1e-6), 1.0 - 1e-6)
+    return math.log(p / (1.0 - p))
+
+
+def _softplus_inv(y: float) -> float:
+    """Inverse softplus: θ such that softplus(θ) = y, for y > 0."""
+    return math.log(math.expm1(max(y, 1e-6)))
+
+
+# Upper bound on the buffer-coupling rates. The calcium↔buffer linear subsystem has the 2×2 map
+# [[ρc − αon(1−BUF), αoff], [αon(1−BUF), ρb − αoff]]; bounding αon/αoff keeps its spectral radius
+# < 1 for all BUF∈[0,1] and ρ∈(0,1), so learning the kinetics can never destabilize the recurrence
+# (see docs/differentiable_synaptic_dynamics_design.md §4).
+_ABUF_MAX = 0.5
+
+
+class LearnableKinetics(nn.Module):
+    """Stability-preserving, SGD-learnable presynaptic calcium/buffer kinetics (yw9.3).
+
+    Decays are mapped through ``sigmoid`` so they stay in ``(0,1)`` (contractive leaky integrators);
+    the influx gain through ``softplus`` so it stays positive; the buffer-coupling rates through a
+    bounded ``_ABUF_MAX·sigmoid`` so the C↔BUF subsystem provably stays contractive. The raw
+    Parameters are initialized (via the inverse maps) so a fresh module reproduces the cfg constants
+    EXACTLY — turning ``learnable_kinetics`` on is a no-op until SGD moves them.
+    """
+
+    def __init__(self, cfg: "SynapticConfig"):
+        super().__init__()
+        rho_c0 = math.exp(-1.0 / cfg.tau_c)
+        rho_b0 = math.exp(-1.0 / cfg.tau_buf)
+        self.theta_rho_c = nn.Parameter(torch.tensor(_logit(rho_c0)))
+        self.theta_rho_b = nn.Parameter(torch.tensor(_logit(rho_b0)))
+        self.theta_alpha_ca = nn.Parameter(torch.tensor(_softplus_inv(cfg.alpha_ca)))
+        self.theta_alpha_buf_on = nn.Parameter(torch.tensor(_logit(cfg.alpha_buf_on / _ABUF_MAX)))
+        self.theta_alpha_buf_off = nn.Parameter(torch.tensor(_logit(cfg.alpha_buf_off / _ABUF_MAX)))
+
+    @property
+    def rho_c(self) -> Tensor:
+        return torch.sigmoid(self.theta_rho_c)
+
+    @property
+    def rho_b(self) -> Tensor:
+        return torch.sigmoid(self.theta_rho_b)
+
+    @property
+    def alpha_ca(self) -> Tensor:
+        return F.softplus(self.theta_alpha_ca)
+
+    @property
+    def alpha_buf_on(self) -> Tensor:
+        return _ABUF_MAX * torch.sigmoid(self.theta_alpha_buf_on)
+
+    @property
+    def alpha_buf_off(self) -> Tensor:
+        return _ABUF_MAX * torch.sigmoid(self.theta_alpha_buf_off)
+
+    @torch.no_grad()
+    def values(self) -> Dict[str, float]:
+        """Current constrained kinetic values (for telemetry / tests)."""
+        return {
+            "rho_c": float(self.rho_c),
+            "rho_b": float(self.rho_b),
+            "alpha_ca": float(self.alpha_ca),
+            "alpha_buf_on": float(self.alpha_buf_on),
+            "alpha_buf_off": float(self.alpha_buf_off),
+        }
+
+
 # -----------------------------------------------------------------------------
 # Presynaptic biophysics
 # -----------------------------------------------------------------------------
@@ -483,6 +559,9 @@ class SynapticPresyn(nn.Module):
         super().__init__()
         object.__setattr__(self, "cfg", cfg)
         self.register_buffer("ema_e", torch.ones(1))
+        # yw9.3: SGD-learnable, stability-preserving calcium/buffer kinetics (default-off). When
+        # present, release_canonical sources rho_c/rho_b/alpha_* from these Parameters.
+        self.kinetics = LearnableKinetics(cfg) if cfg.learnable_kinetics else None
 
     # The legacy sigmoid release() + _mix_prob were removed here (qcj7). The faithful canonical
     # release lives in release_canonical (below) and is used by ALL paths now (standard + flex);
@@ -554,8 +633,19 @@ class SynapticPresyn(nn.Module):
         dtype = state["C"].dtype
         flat_idx = idx.reshape(B, H, -1)
 
-        rho_c = math.exp(-1.0 / cfg.tau_c)   # calcium decay time-constant (unified across paths)
-        rho_b = math.exp(-1.0 / cfg.tau_buf)  # buffer decay
+        # yw9.3: source the calcium/buffer kinetics from learnable Parameters when enabled, else
+        # the hand-tuned cfg constants. The learnable values are stability-preserving by
+        # construction (decays via sigmoid∈(0,1), gains via softplus, buffer-coupling bounded) and
+        # initialized to match cfg exactly, so a fresh learnable module reproduces this forward.
+        if self.kinetics is not None:
+            rho_c, rho_b = self.kinetics.rho_c, self.kinetics.rho_b
+            alpha_ca = self.kinetics.alpha_ca
+            alpha_buf_on, alpha_buf_off = self.kinetics.alpha_buf_on, self.kinetics.alpha_buf_off
+        else:
+            rho_c = math.exp(-1.0 / cfg.tau_c)   # calcium decay time-constant (unified across paths)
+            rho_b = math.exp(-1.0 / cfg.tau_buf)  # buffer decay
+            alpha_ca = cfg.alpha_ca
+            alpha_buf_on, alpha_buf_off = cfg.alpha_buf_on, cfg.alpha_buf_off
 
         # --- gather per-edge state for the selected keys (prior state is detached) ---
         c_prev = state["C"].gather(2, flat_idx).view(B, H, T, K)
@@ -566,11 +656,11 @@ class SynapticPresyn(nn.Module):
         e_energy = state["E"].gather(2, flat_idx).view(B, H, T, K)
 
         # --- calcium + buffer ODE (BUF now ACTIVE; influx carries the grad w.r.t. drive) ---
-        influx = cfg.alpha_ca * F.softplus(drive)
+        influx = alpha_ca * F.softplus(drive)
         c_edge = (
             rho_c * c_prev + influx
-            - cfg.alpha_buf_on * c_prev * (1.0 - buf_prev)
-            + cfg.alpha_buf_off * buf_prev
+            - alpha_buf_on * c_prev * (1.0 - buf_prev)
+            + alpha_buf_off * buf_prev
         ).clamp(min=0.0)
 
         # --- faithful Hill release probability, then release = p * available RRP (<= RRP) ---
@@ -652,13 +742,13 @@ class SynapticPresyn(nn.Module):
             # calcium + buffer at key positions (faithful BUF ODE)
             c_k, buf_k = state["C"], state["BUF"]
             c_up = (
-                rho_c * c_k + cfg.alpha_ca * F.softplus(drv_vals) * accessed
-                - cfg.alpha_buf_on * c_k * (1.0 - buf_k)
-                + cfg.alpha_buf_off * buf_k
+                rho_c * c_k + alpha_ca * F.softplus(drv_vals) * accessed
+                - alpha_buf_on * c_k * (1.0 - buf_k)
+                + alpha_buf_off * buf_k
             ).clamp(min=0.0)
             buf_up = (
-                rho_b * buf_k + cfg.alpha_buf_on * c_k * (1.0 - buf_k)
-                - cfg.alpha_buf_off * buf_k
+                rho_b * buf_k + alpha_buf_on * c_k * (1.0 - buf_k)
+                - alpha_buf_off * buf_k
             ).clamp(0.0, 1.0)
 
             # RRP depletion + endocytosis delay queue + priming refill

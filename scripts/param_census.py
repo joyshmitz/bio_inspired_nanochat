@@ -76,6 +76,7 @@ SUBSYSTEM: dict[str, str] = {
     "stochastic_tau": "general",
     "stochastic_count_cap": "general",
     "tau_c": "presynaptic",
+    "learnable_kinetics": "presynaptic",
     "doc2_gain": "presynaptic",
     "prime_rate": "presynaptic",
     "unprime_per_release": "presynaptic",
