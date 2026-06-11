@@ -18,6 +18,7 @@
 #
 # This file is intentionally verbose and highly instrumented for clarity.
 
+import contextlib
 import math
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Dict, Literal, cast, Any
@@ -480,6 +481,7 @@ class SynapticPresyn(nn.Module):
         valid: Optional[Tensor] = None,
         q_pos: Optional[Tensor] = None,
         apply_barrier: bool = False,
+        differentiable: bool = False,
     ) -> Tensor:
         """CANONICAL unified presynaptic release — the single, faithful, differentiable
         source of truth (8j9.2).
@@ -581,10 +583,17 @@ class SynapticPresyn(nn.Module):
             dist = (qpos.reshape(1, 1, T, 1) - idx.to(torch.float32)).abs() / float(max(1, t_key))
             e = e * torch.exp(-cfg.barrier_strength * dist).to(e.dtype)
 
-        # === scatter faithful state updates back to key positions (recurrence DETACHED) ===
-        with torch.no_grad():
-            flat_rel = rel.detach().reshape(B, H, -1).to(dtype)
-            flat_drive = drive.detach().reshape(B, H, -1).to(dtype)
+        # === scatter faithful state updates back to key positions ===
+        # The state recurrence is DETACHED by default (parity with 8j9.2). yw9.2: when
+        # ``differentiable`` is set, the SAME math runs under grad (no detach) so the advanced
+        # state carries gradient w.r.t. this step's inputs/params — enabling BPTT through
+        # calcium/RRP/energy across a chain of calls (yw9.2.3 chunked TBPTT). The forward VALUE is
+        # byte-identical in both modes (only gradient tracking differs); the returned bias ``e`` is
+        # already differentiable w.r.t. ``drive`` regardless, so this flag affects only the state.
+        state_ctx = contextlib.nullcontext() if differentiable else torch.no_grad()
+        with state_ctx:
+            flat_rel = (rel if differentiable else rel.detach()).reshape(B, H, -1).to(dtype)
+            flat_drive = (drive if differentiable else drive.detach()).reshape(B, H, -1).to(dtype)
             if valid is not None:
                 flat_valid_bool = valid.reshape(B, H, -1)
                 flat_valid = flat_valid_bool.to(dtype)
