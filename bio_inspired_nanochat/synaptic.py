@@ -427,6 +427,44 @@ def vesicle_depletion_refill(
     return rrp3, res3, new_delay, diagnostics
 
 
+@torch.no_grad()
+def _detach_presyn_state(state: Dict[str, Any]) -> None:
+    """Detach every tensor in a presyn state dict IN PLACE (truncates the gradient graph but
+    keeps the values). Used at chunk boundaries for truncated BPTT (yw9.2.3)."""
+    for k, v in list(state.items()):
+        if torch.is_tensor(v):
+            state[k] = v.detach()
+        elif isinstance(v, list):
+            state[k] = [x.detach() if torch.is_tensor(x) else x for x in v]
+
+
+def chunked_recurrence(
+    presyn: "SynapticPresyn",
+    state: Dict[str, Any],
+    drives: List[Tensor],
+    idxs: List[Tensor],
+    *,
+    chunk_len: int,
+    train: bool = False,
+) -> List[Tensor]:
+    """Run the DIFFERENTIABLE presynaptic recurrence over a sequence of steps with truncated
+    BPTT (yw9.2.3).
+
+    ``drives``/``idxs`` are per-step ``(B,H,T,K)`` tensors. The carried ``state`` is advanced with
+    ``release_canonical(differentiable=True)`` so gradients flow through it; every ``chunk_len``
+    steps the state is DETACHED, so backprop is truncated to within a chunk and peak memory is
+    bounded by ``chunk_len`` steps instead of the full sequence length. ``chunk_len <= 0`` disables
+    truncation (full BPTT). Detaching changes only the gradient graph, never the forward values, so
+    the returned per-step release biases are identical to a full-BPTT (or detached) run.
+    """
+    outs: List[Tensor] = []
+    for t, (drive, idx) in enumerate(zip(drives, idxs)):
+        if chunk_len > 0 and t > 0 and (t % chunk_len == 0):
+            _detach_presyn_state(state)
+        outs.append(presyn.release_canonical(state, drive, idx, train=train, differentiable=True))
+    return outs
+
+
 # -----------------------------------------------------------------------------
 # Presynaptic biophysics
 # -----------------------------------------------------------------------------
