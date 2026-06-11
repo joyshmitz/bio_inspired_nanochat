@@ -79,7 +79,7 @@ def test_disabled_bus_is_inert():
     bus.update(loss=2.0)
     bus.update(loss=1.0)
     assert bus.levels() == {"da": 0.0, "ach": 0.0, "ne": 0.0}
-    assert bus.gains() == {"plasticity": 1.0, "explore": 1.0, "global": 1.0}
+    assert bus.gains() == {"plasticity": 1.0, "explore": 1.0, "attend": 1.0, "global": 1.0}
 
 
 # --------------------------------------------------------------------------- #

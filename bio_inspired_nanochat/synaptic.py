@@ -1053,6 +1053,13 @@ class SynapticLinear(nn.Module):
         if self.input_ln is not None:
             x = self.input_ln(x)
 
+        # hy8.5: acetylcholine attention/input gain. Default-neutral (1.0) unless a
+        # NeuromodulatoryBus broadcast a gain — higher ACh (uncertainty) sharpens input
+        # sensitivity. Applied before the matmuls so it modulates both output and Hebbian traces.
+        ach_in = getattr(self, "_nm_ach_input_gain", 1.0)
+        if ach_in != 1.0:
+            x = x * ach_in
+
         # vg9.2: flush any plasticity Parameter writes deferred from the previous (training)
         # forward, BEFORE this step's matmuls use those Parameters — autograd-safe because they
         # have not yet been saved for this step's backward. First call is a no-op (zero traces).

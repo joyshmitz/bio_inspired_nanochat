@@ -38,8 +38,11 @@ class NeuromodConfig:
     da_gain_slope: float = 1.0
     ach_gain_slope: float = 2.0
     ne_gain_slope: float = 0.5
+    # ACh also drives an INPUT/attention gain (hy8.5): uncertainty sharpens input sensitivity.
+    ach_input_slope: float = 1.0
     da_gain_range: Tuple[float, float] = (0.0, 4.0)
     ach_gain_range: Tuple[float, float] = (0.0, 4.0)
+    ach_input_range: Tuple[float, float] = (0.5, 2.0)
     ne_gain_range: Tuple[float, float] = (0.5, 2.0)
     # NE novelty above this triggers a per-sequence reset on broadcast (0 = disabled)
     novelty_reset_thresh: float = 0.0
@@ -143,6 +146,7 @@ class NeuromodulatoryBus(nn.Module):
         return {
             "plasticity": _clamp(1.0 + cfg.da_gain_slope * float(self.da), cfg.da_gain_range),
             "explore": _clamp(1.0 + cfg.ach_gain_slope * float(self.ach), cfg.ach_gain_range),
+            "attend": _clamp(1.0 + cfg.ach_input_slope * float(self.ach), cfg.ach_input_range),
             "global": _clamp(1.0 + cfg.ne_gain_slope * float(self.ne), cfg.ne_gain_range),
         }
 
@@ -156,6 +160,7 @@ class NeuromodulatoryBus(nn.Module):
             if isinstance(m, SynapticLinear):
                 m._nm_da_gain = g["plasticity"]
                 m._nm_ne_gain = g["global"]
+                m._nm_ach_input_gain = g["attend"]  # ACh attention/input gain (hy8.5)
                 n += 1
             elif isinstance(m, SynapticPresyn):
                 m._nm_ach_gain = g["explore"]
