@@ -48,6 +48,7 @@ from bio_inspired_nanochat.report import get_report
 from bio_inspired_nanochat.tokenizer import get_token_bytes, get_tokenizer
 from bio_inspired_nanochat.divergence_guard import GuardAction, build_divergence_guard
 from bio_inspired_nanochat.torch_imports import F, torch
+from bio_inspired_nanochat.run_logging import TrainingTelemetry
 from scripts.base_eval import evaluate_model
 
 dist = cast(Any, torch_dist)
@@ -255,6 +256,21 @@ model.init_weights()
 base_dir = get_base_dir()
 output_dirname = model_tag if model_tag else f"d{depth}"  # e.g. d12
 checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
+
+# hwxb.7.1: unified telemetry — structured JSONL (queryable; consumed by the Phase-4
+# ablation analysis) + TensorBoard scalars, rank-0 only (no-op on other ranks).
+telemetry = TrainingTelemetry(
+    os.path.join("runs", "telemetry", output_dirname),
+    name=run if run != "dummy" else f"train-{output_dirname}",
+    is_master=master_process,
+    heavy_every=100,
+    provenance={
+        "synapses": bool(use_syn),
+        "depth": int(depth),
+        "world_size": int(ddp_world_size),
+        "seed": int(init_seed),
+    },
+)
 resuming = resume_from_step != -1
 if resuming:
     print0(f"Resuming optimization from step {resume_from_step}")
@@ -505,6 +521,7 @@ while True:
                 "val/bpb": val_bpb,
             }
         )
+        telemetry.log_eval(step, val_bpb=float(val_bpb), min_val_bpb=float(min_val_bpb))
         model.train()
 
     # once in a while: estimate the CORE metric (all ranks participate)
@@ -657,6 +674,7 @@ while True:
         nm_bus.broadcast(orig_model)
         if neuromod_log_every and step % neuromod_log_every == 0:
             tel = nm_bus.telemetry()
+            telemetry.log_bio(step, neuromod=tel)
             print0(
                 f"  [neuromod] DA={tel['nm/da']:+.3f} ACh={tel['nm/ach']:.3f} NE={tel['nm/ne']:.3f} "
                 f"| gains: plast={tel['nm/gain_plasticity']:.3f} explore={tel['nm/gain_explore']:.3f} "
@@ -702,6 +720,17 @@ while True:
         if grad_clip_enabled:
             log_data["train/grad_norm"] = grad_norm
         wandb_run.log(log_data)
+        telemetry.log_train_step(
+            step,
+            loss=debiased_smooth_loss,
+            lr=lrm,
+            grad_norm=(grad_norm if grad_clip_enabled else None),
+            tok_per_sec=tok_per_sec,
+            step_ms=dt * 1000.0,
+            mfu=mfu,
+            vram_gb=get_max_memory() / 1024**3,
+            divergence_action=_guard.action.name,
+        )
 
     if viz is not None:
         # Use orig_model for visualization to avoid compilation artifacts if any
@@ -772,5 +801,6 @@ if ddp_rank == 0:
 # cleanup
 if viz is not None:
     viz.close()
+telemetry.close()  # hwxb.7.1: flush + close the unified telemetry (TB + JSONL)
 wandb_run.finish()  # wandb run finish
 compute_cleanup()
