@@ -336,11 +336,12 @@ def affine_scan(a: Tensor, b: Tensor, x0: Optional[Tensor] = None) -> Tensor:
     """
     T = a.shape[0]
     # A, B hold the cumulative affine map F_t (so far) at each position; init = the per-step maps.
-    # After the scan, F_t = (A_t, B_t) satisfies x_t = A_t * x0 + B_t.
-    A = a.broadcast_to(b.shape) if a.shape != b.shape else a
-    B = b.broadcast_to(A.shape) if b.shape != A.shape else b
-    A = A.clone()
-    B = B.clone()
+    # After the scan, F_t = (A_t, B_t) satisfies x_t = A_t * x0 + B_t. Broadcast both to a common
+    # shape (symmetric — handles a or b carrying the broadcastable singleton dim) and clone so the
+    # in-place-free scan below has contiguous, independent buffers.
+    shape = torch.broadcast_shapes(a.shape, b.shape)
+    A = a.broadcast_to(shape).clone()
+    B = b.broadcast_to(shape).clone()
     d = 1
     while d < T:
         # out[t-d] is the earlier/left operand, identity-padded with (a=1, b=0) for the first d.
@@ -421,8 +422,14 @@ def vesicle_depletion_refill(
     over = _soft_relu(rrp2 - rrp_cap, beta)
     rrp3 = rrp2 - over
     res3 = res2 + over
-    # 5) in-flight queue shift (drop the recovered head, append the newly recycled tail)
-    new_delay = (delay[1:] if endo > 0 else []) + [recycled]
+    # 5) in-flight queue shift (drop the recovered head, append the newly recycled tail). With no
+    #    delay buffer (endo_delay==0) there is nowhere to queue the recycled vesicles, so route
+    #    them straight back to the reserve — keeping the queue empty AND the conservation budget.
+    if endo > 0:
+        new_delay = delay[1:] + [recycled]
+    else:
+        new_delay = []
+        res3 = res3 + recycled
     diagnostics = {
         "released_eff": released_eff,
         "recycled": recycled,
@@ -575,7 +582,9 @@ class LearnableKinetics(nn.Module):
         differentiable in the kinetics, so it can be read as a telemetry/stability margin or used
         as a soft penalty. See docs/stable_recurrence_theory.md for the derivation.
         """
-        betas = torch.linspace(0.0, 1.0, n_beta, dtype=self.theta_rho_c.dtype)
+        betas = torch.linspace(
+            0.0, 1.0, n_beta, dtype=self.theta_rho_c.dtype, device=self.theta_rho_c.device
+        )
         rho = cb_spectral_radius(
             self.rho_c, self.rho_b, self.alpha_buf_on, self.alpha_buf_off, betas
         )
@@ -648,12 +657,15 @@ class SynapticPresyn(nn.Module):
         BUFFER ODE (BUF, which release() ignored), energy->AMPA `qamp`, and the septin distance
         barrier — onto release()'s top-k, key-indexed, differentiable scatter structure.
 
-        Differentiability scope (per 8j9.2 scope boundary): the RETURNED bias is differentiable
-        w.r.t. the INPUT `drive` (parity with what release() feeds into the attention logits).
-        The STATE RECURRENCE is detached — making the kinetics recurrence differentiable via
-        BPTT is the separate yw9 epic. Preserves the stochastic STE path, the endocytosis DELAY
-        queue, Doc2, and EMA normalization. AMP is carried but superseded by energy->qamp (the
-        faithful amplitude); the vestigial AMP dynamics are removed in the param-unify step.
+        Differentiability scope: the RETURNED bias is always differentiable w.r.t. the INPUT
+        `drive` (parity with what release() feeds into the attention logits). The STATE RECURRENCE
+        is DETACHED BY DEFAULT (8j9.2 scope boundary); pass ``differentiable=True`` (yw9.2) to run
+        the same state update under autograd so the advanced state carries gradient w.r.t. this
+        step's inputs/params — the byte-identical forward value, enabling BPTT through
+        calcium/RRP/energy (yw9.2.3 chunked TBPTT; yw9.3 learnable kinetics). Preserves the
+        stochastic STE path, the endocytosis DELAY queue, Doc2, and EMA normalization. AMP is
+        carried but superseded by energy->qamp (the faithful amplitude); the vestigial AMP
+        dynamics are removed in the param-unify step.
 
         drive: (B,H,T,K) top-k attention logits; idx: (B,H,T,K) selected key indices.
         apply_barrier: fold the septin distance barrier into e (default False; the live attention

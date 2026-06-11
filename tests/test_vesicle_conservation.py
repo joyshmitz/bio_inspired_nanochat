@@ -61,6 +61,21 @@ def test_conservation_is_exact(rec_rate, saturate):
 
 
 @pytest.mark.unit
+def test_no_delay_buffer_keeps_queue_empty_and_conserves():
+    # endo_delay==0: recycled vesicles have nowhere to queue, so they route straight back to the
+    # reserve — the queue must stay EMPTY (not grow to length 1) and the budget must still hold.
+    rrp, res, _ = _pools(seed=11, n_delay=0)
+    released = torch.rand((4, 3), dtype=torch.float64) * 20.0
+    t0 = rrp.sum() + res.sum()
+    rrp2, res2, delay2, diag = vesicle_depletion_refill(
+        rrp, res, [], released, prime_rate=PRIME, rec_rate=0.06, beta=20.0
+    )
+    assert delay2 == [], "no delay buffer => queue stays empty"
+    expected = -diag["released_eff"].sum() * (1.0 - 0.06)
+    assert torch.allclose((rrp2.sum() + res2.sum()) - t0, expected, atol=1e-10)
+
+
+@pytest.mark.unit
 def test_full_recycling_is_exactly_conserved():
     rrp, res, delay = _pools(seed=1)
     released = torch.rand((4, 3)).double() * 30.0  # large -> saturates depletion
