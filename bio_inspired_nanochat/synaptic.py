@@ -212,6 +212,18 @@ class SynapticConfig:
     post_fast_lr: float = 1.5e-3
     post_slow_lr: float = 5e-4
     post_trace_decay: float = 0.96
+    # sax.1 — online fast-weight ("fast-weight programmer") adaptation magnitude/stability.
+    # DEFAULT-OFF (preserves the exact legacy write). The raw rank-R Hebbian delta is
+    # O(trace²) and numerically negligible (|Δw_fast| ~ 1e-7 over many passes), so online
+    # fast-adaptation has effectively no effect; naively raising post_fast_lr diverges
+    # (positive feedback through y_fast). When enabled, the w_fast write is normalized to a
+    # unit-norm direction, stepped by fast_weight_eta, and ||w_fast|| is bounded by
+    # fast_weight_max_norm — making the update both impactful AND stable. (w_slow consolidation
+    # is unchanged.) This is the prerequisite for any consolidation signal (e.g. three-factor
+    # reward-modulated Hebbian, hy8.2) to actually move the fast weights.
+    fast_weight_normalized: bool = False
+    fast_weight_eta: float = 0.5       # O(1) step size on the normalized fast-weight direction
+    fast_weight_max_norm: float = 1.0  # Frobenius-norm cap on w_fast (<=0 disables the cap)
     camkii_up: float = 0.05
     pp1_tau: float = 0.985
     camkii_thr: float = 1.0
@@ -968,8 +980,29 @@ class SynapticLinear(nn.Module):
                 gs = gate_scale.to(device=self.w_fast.device, dtype=self.w_fast.dtype)
             delta = self.u_buf @ self.v_buf
             delta = delta * gs.to(delta.dtype)
-            self.w_fast.mul_(self.cfg.post_fast_decay).add_(self.cfg.post_fast_lr * delta)
-            self.w_slow.add_(self.cfg.post_slow_lr * delta)
+            if self.cfg.fast_weight_normalized:
+                # sax.1: normalized + norm-bounded online write. Step BOTH the fast and slow
+                # online Hebbian writes along the unit-norm Hebbian direction (impactful
+                # regardless of the tiny raw trace magnitude), and cap ||w_fast||. This kills the
+                # positive-feedback blowup that a naive LR boost triggers: the fast pathway
+                # amplifies activations, which feed the otherwise-unbounded w_slow online drift
+                # (`w_slow.add_(post_slow_lr*delta)` has no decay) — so bounding only w_fast still
+                # diverges through w_slow. Bounding the direction of both keeps the system finite.
+                dn = delta.norm()
+                if float(dn) > 1e-12:
+                    direction = delta / dn
+                    self.w_fast.mul_(self.cfg.post_fast_decay).add_(
+                        self.cfg.fast_weight_eta * direction
+                    )
+                    maxn = self.cfg.fast_weight_max_norm
+                    if maxn > 0:
+                        wn = self.w_fast.norm()
+                        if float(wn) > maxn:
+                            self.w_fast.mul_(maxn / wn)
+                    self.w_slow.add_(self.cfg.post_slow_lr * direction)
+            else:
+                self.w_fast.mul_(self.cfg.post_fast_decay).add_(self.cfg.post_fast_lr * delta)
+                self.w_slow.add_(self.cfg.post_slow_lr * delta)
         self.post.hebb_fast(self.u_buf, self.v_buf)
         self.post.consolidate(self.u_buf, self.v_buf)
 
