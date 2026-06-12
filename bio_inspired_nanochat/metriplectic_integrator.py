@@ -77,9 +77,13 @@ def free_energy(z: np.ndarray, T: float = TEMP) -> float:
     return energy(z) - T * entropy(z)
 
 
-def field(z: np.ndarray, omega=OMEGA, gC=GAMMA_C, gB=GAMMA_B) -> np.ndarray:
-    """The continuous metriplectic vector field ż = L∇E + M∇S (for the explicit Euler baseline)."""
-    return L_op(omega) @ grad_E(z) + M_op(z, gC, gB) @ grad_S(z)
+def field(z: np.ndarray, omega=OMEGA, gC=GAMMA_C, gB=GAMMA_B, *, L_fn=L_op, M_fn=M_op) -> np.ndarray:
+    """The continuous metriplectic vector field ż = L∇E + M∇S (for the explicit Euler baseline).
+
+    ``L_fn``/``M_fn`` are injectable so the guards (below) can be exercised with a degeneracy-breaking
+    operator — the case the deterministic fallback exists for.
+    """
+    return L_fn(omega) @ grad_E(z) + M_fn(z, gC, gB) @ grad_S(z)
 
 
 # --------------------------------------------------------------------------- #
@@ -117,6 +121,8 @@ def discrete_gradient_step(
     omega: float = OMEGA,
     gC: float = GAMMA_C,
     gB: float = GAMMA_B,
+    L_fn=L_op,
+    M_fn=M_op,
     max_iter: int = 100,
     tol: float = 1e-13,
 ) -> StepResult:
@@ -131,7 +137,7 @@ def discrete_gradient_step(
         zbar = 0.5 * (z + z_next)
         gE = discrete_gradient(grad_E, energy, z, z_next)
         gS = discrete_gradient(grad_S, entropy, z, z_next)
-        rhs = z + dt * (L_op(omega) @ gE + M_op(zbar, gC, gB) @ gS)
+        rhs = z + dt * (L_fn(omega) @ gE + M_fn(zbar, gC, gB) @ gS)
         if np.max(np.abs(rhs - z_next)) < tol:
             return StepResult(rhs, it, True)
         z_next = rhs
@@ -156,3 +162,134 @@ def euler_integrate(z0: np.ndarray, dt: float, steps: int, **kw) -> np.ndarray:
         z = z + dt * field(z, **kw)
         traj.append(z.copy())
     return np.array(traj)
+
+
+# --------------------------------------------------------------------------- #
+# Runtime monitor + guards + deterministic fallback (beads 0642.1.2.2 / 0642.1.2.3).
+# --------------------------------------------------------------------------- #
+def degeneracy_residuals(z: np.ndarray, *, L_fn=L_op, M_fn=M_op,
+                         omega=OMEGA, gC=GAMMA_C, gB=GAMMA_B) -> tuple[float, float]:
+    """`(‖L·∇S‖, ‖M·∇E‖)` — the degeneracy residuals (both 0 for the structural operators)."""
+    L, M = L_fn(omega), M_fn(z, gC, gB)
+    return float(np.linalg.norm(L @ grad_S(z))), float(np.linalg.norm(M @ grad_E(z)))
+
+
+@dataclass(frozen=True)
+class GuardThresholds:
+    """Per-step tolerances for the conservation/entropy/degeneracy guards."""
+
+    eps_E: float = 1e-8    # max |E(z') − E(z)| (energy drift)
+    eps_S: float = 1e-10   # entropy production must be ≥ −eps_S
+    eps_D: float = 1e-8    # degeneracy residuals ‖L∇S‖, ‖M∇E‖ must be ≤ eps_D
+
+
+@dataclass
+class StepRecord:
+    """Auditable per-step monitor record (the runtime stability certificate evidence)."""
+
+    step: int
+    E: float
+    S: float
+    F: float
+    entropy_production: float   # S(z') − S(z), should be ≥ −eps_S
+    energy_drift: float         # E(z') − E(z), should be ≈ 0
+    res_L_gradS: float
+    res_M_gradE: float
+    used_fallback: bool
+    breach: str                 # "" if all guards passed, else which guard tripped
+
+
+def guarded_step(
+    z: np.ndarray, dt: float, step: int, thr: GuardThresholds, *,
+    omega=OMEGA, gC=GAMMA_C, gB=GAMMA_B, T=TEMP, L_fn=L_op, M_fn=M_op,
+) -> tuple[np.ndarray, StepRecord]:
+    """One discrete-gradient step under the guards; revert to the clamped-Euler baseline on a breach.
+
+    Budgeted-mode discipline: a (learned) `L/M` that violates degeneracy, or a step that drifts
+    energy or destroys entropy beyond tolerance, must NEVER corrupt training — the step deterministically
+    falls back to the safe `vg9` Euler baseline and the event is recorded.
+    """
+    res_ls, res_me = degeneracy_residuals(z, L_fn=L_fn, M_fn=M_fn, omega=omega, gC=gC, gB=gB)
+    z_prop = discrete_gradient_step(z, dt, omega=omega, gC=gC, gB=gB, L_fn=L_fn, M_fn=M_fn).z_next
+    d_e = energy(z_prop) - energy(z)
+    d_s = entropy(z_prop) - entropy(z)
+
+    breach = ""
+    if res_ls > thr.eps_D or res_me > thr.eps_D:
+        breach = "degeneracy"
+    elif abs(d_e) > thr.eps_E:
+        breach = "energy_drift"
+    elif d_s < -thr.eps_S:
+        breach = "entropy"
+
+    if breach:
+        # Deterministic fallback: the clamped-Euler baseline step (vg9.5/vg9.7), the safe default.
+        z_next = z + dt * field(z, omega, gC, gB, L_fn=L_fn, M_fn=M_fn)
+        used_fallback = True
+    else:
+        z_next, used_fallback = z_prop, False
+
+    rec = StepRecord(
+        step=step, E=energy(z_next), S=entropy(z_next), F=free_energy(z_next, T),
+        entropy_production=entropy(z_next) - entropy(z), energy_drift=energy(z_next) - energy(z),
+        res_L_gradS=res_ls, res_M_gradE=res_me, used_fallback=used_fallback, breach=breach,
+    )
+    return z_next, rec
+
+
+class LyapunovMonitor:
+    """Accumulates per-step records and asserts the free-energy Lyapunov obligation holds.
+
+    The auditable evidence for the stability obligation (0642.1.2.2): `F = E − T·S` must be
+    non-increasing within tolerance, energy conserved, entropy non-decreasing — logged per step so the
+    guarantee is something you can SEE, not just a paper claim. Pair with the structured-logging
+    schema (`run_logging.TrainingTelemetry`) to emit one record per step.
+    """
+
+    def __init__(self, tol: float = 1e-8) -> None:
+        self.records: list[StepRecord] = []
+        self.tol = tol
+
+    def append(self, rec: StepRecord) -> None:
+        self.records.append(rec)
+
+    def free_energy_nonincreasing(self) -> bool:
+        f = [r.F for r in self.records]
+        return all(f[i + 1] <= f[i] + self.tol for i in range(len(f) - 1))
+
+    def assert_lyapunov(self) -> None:
+        if not self.free_energy_nonincreasing():
+            bad = next(i for i in range(len(self.records) - 1)
+                       if self.records[i + 1].F > self.records[i].F + self.tol)
+            raise AssertionError(
+                f"free-energy Lyapunov obligation breached at step {self.records[bad].step}: "
+                f"F {self.records[bad].F:.6g} -> {self.records[bad + 1].F:.6g}"
+            )
+
+    def summary(self) -> dict:
+        if not self.records:
+            return {"steps": 0}
+        return {
+            "steps": len(self.records),
+            "max_energy_drift": max(abs(r.energy_drift) for r in self.records),
+            "min_entropy_production": min(r.entropy_production for r in self.records),
+            "max_degeneracy_residual": max(max(r.res_L_gradS, r.res_M_gradE) for r in self.records),
+            "n_fallbacks": sum(1 for r in self.records if r.used_fallback),
+            "lyapunov_ok": self.free_energy_nonincreasing(),
+        }
+
+
+def run_monitored(
+    z0: np.ndarray, dt: float, steps: int, *,
+    thresholds: GuardThresholds | None = None, **kw,
+) -> tuple[np.ndarray, LyapunovMonitor]:
+    """Integrate under the guards + monitor; return the trajectory and the populated monitor."""
+    thr = thresholds or GuardThresholds()
+    z = np.asarray(z0, dtype=np.float64).copy()
+    traj = [z.copy()]
+    monitor = LyapunovMonitor()
+    for step in range(steps):
+        z, rec = guarded_step(z, dt, step, thr, **kw)
+        monitor.append(rec)
+        traj.append(z.copy())
+    return np.array(traj), monitor

@@ -290,6 +290,12 @@ class SynapticConfig:
     # and the model falls back to the heuristic sax.2 latch (no retention claim).
     cusp_latch: bool = False
     cusp_eps_max: float = 0.98       # max fast-subsystem spectral radius rho(M_cb) that still certifies
+    # 0642.1.2.4: use the structure-preserving discrete-gradient integrator
+    # (bio_inspired_nanochat/metriplectic_integrator.py) for the calcium/buffer subsystem instead of
+    # the clamped-Euler step, so energy is conserved + free energy is Lyapunov at the DISCRETE level
+    # (docs/theory/metriplectic.md, 0642.1.1/0642.1.2.1). DEFAULT-OFF; the guard layer reverts any
+    # breaching step to the clamped-Euler baseline (0642.1.2.3).
+    metriplectic_integrator: bool = False
     # vg9.2: run online Hebbian plasticity during TRAINING (grad enabled), not only under
     # inference/no_grad. The headline "online Hebbian learning" was previously gated behind
     # `not torch.is_grad_enabled()` and so NEVER ran at train time. When True (default), the
@@ -656,6 +662,14 @@ class SynapticPresyn(nn.Module):
         # yw9.3: SGD-learnable, stability-preserving calcium/buffer kinetics (default-off). When
         # present, release_canonical sources rho_c/rho_b/alpha_* from these Parameters.
         self.kinetics = LearnableKinetics(cfg) if cfg.learnable_kinetics else None
+
+    def use_metriplectic_integrator(self) -> bool:
+        """Dispatch predicate (0642.1.2.4): advance the calcium/buffer subsystem with the
+        structure-preserving discrete-gradient integrator
+        (``bio_inspired_nanochat.metriplectic_integrator``) instead of the clamped-Euler step, so
+        energy is conserved and the free energy is Lyapunov at the discrete level. DEFAULT-OFF; the
+        integration call site is wired in 0642.1.2 — this is the toggle read."""
+        return bool(self.cfg.metriplectic_integrator)
 
     # The legacy sigmoid release() + _mix_prob were removed here (qcj7). The faithful canonical
     # release lives in release_canonical (below) and is used by ALL paths now (standard + flex);

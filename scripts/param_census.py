@@ -147,6 +147,7 @@ SUBSYSTEM: dict[str, str] = {
     "latch_gate_beta": "latch",
     "cusp_latch": "latch",
     "cusp_eps_max": "latch",
+    "metriplectic_integrator": "presynaptic",
     "plasticity_during_training": "postsynaptic",
     "structural_interval": "structural",
     "structural_tau_util": "structural",

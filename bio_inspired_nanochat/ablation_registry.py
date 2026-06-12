@@ -95,6 +95,12 @@ MECHANISMS: tuple[MechanismFlag, ...] = (
         "Runtime cusp retention certificate (delta*) + epsilon-gauge fallback for the bistable "
         "latch (0642.2.2.3).",
     ),
+    MechanismFlag(
+        "metriplectic_integrator", "metriplectic_integrator", False, False, False,
+        ("enable_presyn",),
+        "Structure-preserving discrete-gradient integrator for the calcium/buffer subsystem "
+        "(0642.1.2.4); exact discrete energy conservation + free-energy Lyapunov.",
+    ),
 )
 
 _BY_FIELD: dict[str, MechanismFlag] = {m.field: m for m in MECHANISMS}
