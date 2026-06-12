@@ -282,6 +282,14 @@ class SynapticConfig:
     latch_beta_camkii: float = 0.3   # CaMKII -> PP1 cross-inhibition (maintains the latch)
     latch_pp1_basal: float = 0.3     # basal phosphatase floor (keeps the OFF state stable)
     latch_gate_beta: float = 6.0     # consolidation-gate steepness, sigmoid(beta*(CaMKII-PP1))
+    # 0642.2.2.3: enable the runtime RETENTION CERTIFICATE for the bistable latch — the closed-form
+    # cusp hysteresis half-width delta* (docs/theory/singular_perturbation.md §4) computed by
+    # bio_inspired_nanochat/cusp_certificate.py, gated by an epsilon (normal-hyperbolicity) check.
+    # DEFAULT-OFF observability/gate: requires bistable_latch; when the timescale separation is
+    # insufficient (rho_fast > cusp_eps_max) or the latch is monostable, the certificate is dropped
+    # and the model falls back to the heuristic sax.2 latch (no retention claim).
+    cusp_latch: bool = False
+    cusp_eps_max: float = 0.98       # max fast-subsystem spectral radius rho(M_cb) that still certifies
     # vg9.2: run online Hebbian plasticity during TRAINING (grad enabled), not only under
     # inference/no_grad. The headline "online Hebbian learning" was previously gated behind
     # `not torch.is_grad_enabled()` and so NEVER ran at train time. When True (default), the

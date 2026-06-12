@@ -90,6 +90,11 @@ MECHANISMS: tuple[MechanismFlag, ...] = (
         "Causal chunked-TBPTT presyn recurrence that gives the learnable kinetics gradient in a "
         "real training forward (yw9.2 wired by hwxb.4.6).",
     ),
+    MechanismFlag(
+        "cusp_latch", "cusp_latch", False, False, False, ("bistable_latch",),
+        "Runtime cusp retention certificate (delta*) + epsilon-gauge fallback for the bistable "
+        "latch (0642.2.2.3).",
+    ),
 )
 
 _BY_FIELD: dict[str, MechanismFlag] = {m.field: m for m in MECHANISMS}
@@ -172,6 +177,11 @@ def validate_config(cfg: SynapticConfig) -> tuple[list[str], list[str]]:
                 f"latch_ltd_thr ({cfg.latch_ltd_thr}) must be < camkii_thr "
                 f"({cfg.camkii_thr}) so the BCM curve has a neutral zone where the latch holds"
             )
+    if cfg.cusp_latch and not 0.0 < cfg.cusp_eps_max <= 1.0:
+        errors.append(
+            f"cusp_eps_max must be in (0, 1] (a fast-subsystem spectral radius), "
+            f"got {cfg.cusp_eps_max}"
+        )
     if cfg.differentiable_recurrence:
         if cfg.recurrence_block_size < 1:
             errors.append(

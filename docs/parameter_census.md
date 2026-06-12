@@ -2,7 +2,7 @@
 
 > **Generated** by `scripts/param_census.py` (bead `bio_inspired_nanochat-8j9.6`). Do not hand-edit; re-run `uv run python -m scripts.param_census`. Machine-readable companion: [`parameter_census.json`](./parameter_census.json).
 
-`SynapticConfig` has **89 fields** — **89 LIVE** (read by runtime code) and **0 DEAD** (declared, read by nothing). This is the ground truth behind the README's *“48-parameter genome”* framing, which conflated three different counts.
+`SynapticConfig` has **91 fields** — **91 LIVE** (read by runtime code) and **0 DEAD** (declared, read by nothing). This is the ground truth behind the README's *“48-parameter genome”* framing, which conflated three different counts.
 
 ## What the counts actually are
 
@@ -10,7 +10,7 @@
 
 - **The wired search space is 10 params**, not 48. CMA-ES Phase 1 (`TOP10_PARAM_SPECS` in `scripts/tune_bio_params.py`) tunes: `alpha_ca`, `complexin_bias`, `doc2_gain`, `lambda_loge`, `nsf_recover`, `prime_rate`, `syt_fast_kd`, `syt_slow_kd`, `tau_c`, `unprime_per_release`. The 48-/82-parameter figures are the *aspirational* two-phase plan, not shipping code.
 
-- **The config surface is 89 hyperparameters**, every one of which is read by runtime code — `8j9.5` pruned the last dead fields (`enabled`, `camkii_down`, `router_sim_threshold`, `native_presyn`, `native_metrics`, `native_plasticity`).
+- **The config surface is 91 hyperparameters**, every one of which is read by runtime code — `8j9.5` pruned the last dead fields (`enabled`, `camkii_down`, `router_sim_threshold`, `native_presyn`, `native_metrics`, `native_plasticity`).
 
 
 ## Dead fields (read by nothing)
@@ -25,74 +25,74 @@ None — every `SynapticConfig` field is read on some runtime path (invariant en
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `rank_eligibility` | `8` | LIVE |  | bio_inspired_nanochat/synaptic.py:1034 |
-| `attn_topk` | `32` | LIVE |  | bio_inspired_nanochat/synaptic.py:1735 |
-| `stochastic_train_frac` | `0.12` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:159 |
-| `stochastic_mode` | `normal_reparam` | LIVE |  | bio_inspired_nanochat/synaptic.py:773 |
-| `stochastic_tau` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:772 |
-| `stochastic_count_cap` | `8` | LIVE |  | bio_inspired_nanochat/synaptic.py:769 |
+| `rank_eligibility` | `8` | LIVE |  | bio_inspired_nanochat/synaptic.py:1042 |
+| `attn_topk` | `32` | LIVE |  | bio_inspired_nanochat/synaptic.py:1743 |
+| `stochastic_train_frac` | `0.12` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:164 |
+| `stochastic_mode` | `normal_reparam` | LIVE |  | bio_inspired_nanochat/synaptic.py:781 |
+| `stochastic_tau` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:780 |
+| `stochastic_count_cap` | `8` | LIVE |  | bio_inspired_nanochat/synaptic.py:777 |
 
 ### `presynaptic` (11/11 live)
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `tau_c` | `6.0` | LIVE | ✓ | bio_inspired_nanochat/synaptic.py:572 |
-| `learnable_kinetics` | `False` | LIVE |  | bio_inspired_nanochat/synaptic.py:650 |
-| `differentiable_recurrence` | `False` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:175 |
-| `recurrence_block_size` | `64` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:176 |
-| `recurrence_chunk_len` | `0` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:180 |
+| `tau_c` | `6.0` | LIVE | ✓ | bio_inspired_nanochat/cusp_certificate.py:100 |
+| `learnable_kinetics` | `False` | LIVE |  | bio_inspired_nanochat/synaptic.py:658 |
+| `differentiable_recurrence` | `False` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:185 |
+| `recurrence_block_size` | `64` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:186 |
+| `recurrence_chunk_len` | `0` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:190 |
 | `doc2_gain` | `0.08` | LIVE | ✓ | bio_inspired_nanochat/flex_synaptic.py:52 |
-| `prime_rate` | `0.075` | LIVE | ✓ | bio_inspired_nanochat/synaptic.py:852 |
-| `unprime_per_release` | `0.05` | LIVE | ✓ | bio_inspired_nanochat/synaptic.py:857 |
-| `nsf_recover` | `0.08` | LIVE | ✓ | bio_inspired_nanochat/synaptic.py:858 |
-| `rec_rate` | `0.06` | LIVE |  | bio_inspired_nanochat/synaptic.py:847 |
-| `endo_delay` | `3` | LIVE |  | bio_inspired_nanochat/synaptic.py:845 |
+| `prime_rate` | `0.075` | LIVE | ✓ | bio_inspired_nanochat/synaptic.py:860 |
+| `unprime_per_release` | `0.05` | LIVE | ✓ | bio_inspired_nanochat/synaptic.py:865 |
+| `nsf_recover` | `0.08` | LIVE | ✓ | bio_inspired_nanochat/synaptic.py:866 |
+| `rec_rate` | `0.06` | LIVE |  | bio_inspired_nanochat/synaptic.py:855 |
+| `endo_delay` | `3` | LIVE |  | bio_inspired_nanochat/synaptic.py:853 |
 
 ### `initial_state` (6/6 live)
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `init_rrp` | `6.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1519 |
-| `init_reserve` | `18.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1520 |
-| `init_snare` | `0.7` | LIVE |  | bio_inspired_nanochat/synaptic.py:1521 |
-| `init_clamp` | `0.6` | LIVE |  | bio_inspired_nanochat/synaptic.py:1522 |
-| `init_amp` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1525 |
-| `init_energy` | `0.85` | LIVE |  | bio_inspired_nanochat/synaptic.py:1523 |
+| `init_rrp` | `6.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1527 |
+| `init_reserve` | `18.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1528 |
+| `init_snare` | `0.7` | LIVE |  | bio_inspired_nanochat/synaptic.py:1529 |
+| `init_clamp` | `0.6` | LIVE |  | bio_inspired_nanochat/synaptic.py:1530 |
+| `init_amp` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1533 |
+| `init_energy` | `0.85` | LIVE |  | bio_inspired_nanochat/synaptic.py:1531 |
 
 ### `energy` (3/3 live)
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `energy_fill` | `0.02` | LIVE |  | bio_inspired_nanochat/synaptic.py:866 |
-| `energy_use` | `0.02` | LIVE |  | bio_inspired_nanochat/synaptic.py:867 |
-| `energy_max` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:866 |
+| `energy_fill` | `0.02` | LIVE |  | bio_inspired_nanochat/synaptic.py:874 |
+| `energy_use` | `0.02` | LIVE |  | bio_inspired_nanochat/synaptic.py:875 |
+| `energy_max` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:874 |
 
 ### `attention` (4/4 live)
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `lambda_loge` | `1.0` | LIVE | ✓ | bio_inspired_nanochat/synaptic.py:1780 |
-| `barrier_strength` | `0.1` | LIVE |  | bio_inspired_nanochat/synaptic.py:794 |
-| `epsilon` | `1e-06` | LIVE |  | bio_inspired_nanochat/synaptic.py:977 |
-| `loge_bias_clamp` | `10.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1783 |
+| `lambda_loge` | `1.0` | LIVE | ✓ | bio_inspired_nanochat/synaptic.py:1788 |
+| `barrier_strength` | `0.1` | LIVE |  | bio_inspired_nanochat/synaptic.py:802 |
+| `epsilon` | `1e-06` | LIVE |  | bio_inspired_nanochat/synaptic.py:985 |
+| `loge_bias_clamp` | `10.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1791 |
 
 ### `kernel_compat` (18/18 live)
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `tau_buf` | `4.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:573 |
-| `tau_prime` | `5.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:913 |
-| `tau_rrp` | `40.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:914 |
-| `tau_energy` | `50.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:915 |
-| `alpha_ca` | `0.55` | LIVE | ✓ | bio_inspired_nanochat/synaptic.py:576 |
-| `alpha_buf_on` | `0.1` | LIVE |  | bio_inspired_nanochat/synaptic.py:577 |
-| `alpha_buf_off` | `0.1` | LIVE |  | bio_inspired_nanochat/synaptic.py:578 |
-| `alpha_prime` | `0.1` | LIVE |  | bio_inspired_nanochat/synaptic.py:952 |
-| `alpha_unprime` | `0.1` | LIVE |  | bio_inspired_nanochat/synaptic.py:986 |
-| `alpha_refill` | `0.1` | LIVE |  | bio_inspired_nanochat/synaptic.py:953 |
-| `energy_in` | `0.01` | LIVE |  | bio_inspired_nanochat/synaptic.py:955 |
-| `energy_cost_rel` | `0.015` | LIVE |  | bio_inspired_nanochat/synaptic.py:989 |
-| `energy_cost_pump` | `0.01` | LIVE |  | bio_inspired_nanochat/synaptic.py:990 |
+| `tau_buf` | `4.0` | LIVE |  | bio_inspired_nanochat/cusp_certificate.py:101 |
+| `tau_prime` | `5.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:921 |
+| `tau_rrp` | `40.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:922 |
+| `tau_energy` | `50.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:923 |
+| `alpha_ca` | `0.55` | LIVE | ✓ | bio_inspired_nanochat/synaptic.py:584 |
+| `alpha_buf_on` | `0.1` | LIVE |  | bio_inspired_nanochat/cusp_certificate.py:102 |
+| `alpha_buf_off` | `0.1` | LIVE |  | bio_inspired_nanochat/cusp_certificate.py:103 |
+| `alpha_prime` | `0.1` | LIVE |  | bio_inspired_nanochat/synaptic.py:960 |
+| `alpha_unprime` | `0.1` | LIVE |  | bio_inspired_nanochat/synaptic.py:994 |
+| `alpha_refill` | `0.1` | LIVE |  | bio_inspired_nanochat/synaptic.py:961 |
+| `energy_in` | `0.01` | LIVE |  | bio_inspired_nanochat/synaptic.py:963 |
+| `energy_cost_rel` | `0.015` | LIVE |  | bio_inspired_nanochat/synaptic.py:997 |
+| `energy_cost_pump` | `0.01` | LIVE |  | bio_inspired_nanochat/synaptic.py:998 |
 | `syt_fast_kd` | `0.4` | LIVE | ✓ | bio_inspired_nanochat/flex_synaptic.py:50 |
 | `syt_slow_kd` | `1.0` | LIVE | ✓ | bio_inspired_nanochat/flex_synaptic.py:51 |
 | `complexin_bias` | `0.0` | LIVE | ✓ | bio_inspired_nanochat/flex_synaptic.py:54 |
@@ -103,72 +103,74 @@ None — every `SynapticConfig` field is read on some runtime path (invariant en
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `post_fast_decay` | `0.95` | LIVE |  | bio_inspired_nanochat/synaptic.py:1195 |
-| `post_fast_lr` | `0.0015` | LIVE |  | bio_inspired_nanochat/synaptic.py:1195 |
-| `post_slow_lr` | `0.0005` | LIVE |  | bio_inspired_nanochat/synaptic.py:1183 |
-| `post_trace_decay` | `0.96` | LIVE |  | bio_inspired_nanochat/synaptic.py:1315 |
-| `fast_weight_normalized` | `False` | LIVE |  | bio_inspired_nanochat/synaptic.py:1349 |
-| `fast_weight_eta` | `0.5` | LIVE |  | bio_inspired_nanochat/synaptic.py:1361 |
-| `fast_weight_max_norm` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1363 |
-| `camkii_up` | `0.05` | LIVE |  | bio_inspired_nanochat/synaptic.py:1095 |
-| `pp1_tau` | `0.985` | LIVE |  | bio_inspired_nanochat/synaptic.py:1096 |
-| `camkii_thr` | `1.0` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:170 |
-| `pp1_thr` | `0.7` | LIVE |  | bio_inspired_nanochat/synaptic.py:1093 |
-| `bdnf_tau` | `0.985` | LIVE |  | bio_inspired_nanochat/synaptic.py:1110 |
-| `bdnf_scale` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1175 |
-| `bdnf_gamma` | `0.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1175 |
-| `bdnf_hebb_accumulate` | `True` | LIVE |  | bio_inspired_nanochat/synaptic.py:1107 |
-| `bdnf_max` | `10.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1116 |
-| `plasticity_during_training` | `True` | LIVE |  | bio_inspired_nanochat/synaptic.py:1474 |
+| `post_fast_decay` | `0.95` | LIVE |  | bio_inspired_nanochat/synaptic.py:1203 |
+| `post_fast_lr` | `0.0015` | LIVE |  | bio_inspired_nanochat/synaptic.py:1203 |
+| `post_slow_lr` | `0.0005` | LIVE |  | bio_inspired_nanochat/synaptic.py:1191 |
+| `post_trace_decay` | `0.96` | LIVE |  | bio_inspired_nanochat/synaptic.py:1323 |
+| `fast_weight_normalized` | `False` | LIVE |  | bio_inspired_nanochat/synaptic.py:1357 |
+| `fast_weight_eta` | `0.5` | LIVE |  | bio_inspired_nanochat/synaptic.py:1369 |
+| `fast_weight_max_norm` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1371 |
+| `camkii_up` | `0.05` | LIVE |  | bio_inspired_nanochat/synaptic.py:1103 |
+| `pp1_tau` | `0.985` | LIVE |  | bio_inspired_nanochat/synaptic.py:1104 |
+| `camkii_thr` | `1.0` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:175 |
+| `pp1_thr` | `0.7` | LIVE |  | bio_inspired_nanochat/synaptic.py:1101 |
+| `bdnf_tau` | `0.985` | LIVE |  | bio_inspired_nanochat/synaptic.py:1118 |
+| `bdnf_scale` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1183 |
+| `bdnf_gamma` | `0.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1183 |
+| `bdnf_hebb_accumulate` | `True` | LIVE |  | bio_inspired_nanochat/synaptic.py:1115 |
+| `bdnf_max` | `10.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1124 |
+| `plasticity_during_training` | `True` | LIVE |  | bio_inspired_nanochat/synaptic.py:1482 |
 
-### `latch` (12/12 live)
+### `latch` (14/14 live)
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `bistable_latch` | `False` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:163 |
-| `latch_ltd_thr` | `0.5` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:170 |
-| `latch_input_gain` | `12.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1071 |
-| `latch_alpha_ca` | `0.6` | LIVE |  | bio_inspired_nanochat/synaptic.py:1084 |
-| `latch_beta_pp1` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1075 |
-| `latch_gamma_auto` | `0.45` | LIVE |  | bio_inspired_nanochat/synaptic.py:1074 |
-| `latch_hill_n` | `6.0` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:164 |
-| `latch_hill_k` | `0.6` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:166 |
-| `latch_alpha_pp1` | `0.5` | LIVE |  | bio_inspired_nanochat/synaptic.py:1087 |
-| `latch_beta_camkii` | `0.3` | LIVE |  | bio_inspired_nanochat/synaptic.py:1087 |
-| `latch_pp1_basal` | `0.3` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:168 |
-| `latch_gate_beta` | `6.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1165 |
+| `bistable_latch` | `False` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:168 |
+| `latch_ltd_thr` | `0.5` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:175 |
+| `latch_input_gain` | `12.0` | LIVE |  | bio_inspired_nanochat/cusp_certificate.py:57 |
+| `latch_alpha_ca` | `0.6` | LIVE |  | bio_inspired_nanochat/cusp_certificate.py:49 |
+| `latch_beta_pp1` | `1.0` | LIVE |  | bio_inspired_nanochat/cusp_certificate.py:50 |
+| `latch_gamma_auto` | `0.45` | LIVE |  | bio_inspired_nanochat/cusp_certificate.py:51 |
+| `latch_hill_n` | `6.0` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:169 |
+| `latch_hill_k` | `0.6` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:171 |
+| `latch_alpha_pp1` | `0.5` | LIVE |  | bio_inspired_nanochat/synaptic.py:1095 |
+| `latch_beta_camkii` | `0.3` | LIVE |  | bio_inspired_nanochat/synaptic.py:1095 |
+| `latch_pp1_basal` | `0.3` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:173 |
+| `latch_gate_beta` | `6.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:1173 |
+| `cusp_latch` | `False` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:180 |
+| `cusp_eps_max` | `0.98` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:180 |
 
 ### `structural` (6/6 live)
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `structural_interval` | `50000` | LIVE |  | bio_inspired_nanochat/synaptic.py:2102 |
-| `structural_tau_util` | `0.2` | LIVE |  | bio_inspired_nanochat/synaptic.py:2091 |
-| `structural_age_bias` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:2101 |
+| `structural_interval` | `50000` | LIVE |  | bio_inspired_nanochat/synaptic.py:2110 |
+| `structural_tau_util` | `0.2` | LIVE |  | bio_inspired_nanochat/synaptic.py:2099 |
+| `structural_age_bias` | `1.0` | LIVE |  | bio_inspired_nanochat/synaptic.py:2109 |
 | `router_embed_dim` | `24` | LIVE |  | bio_inspired_nanochat/gpt_synaptic.py:488 |
-| `router_contrastive_lr` | `0.0001` | LIVE |  | bio_inspired_nanochat/synaptic.py:2059 |
-| `router_contrastive_push` | `0.1` | LIVE |  | bio_inspired_nanochat/synaptic.py:2059 |
+| `router_contrastive_lr` | `0.0001` | LIVE |  | bio_inspired_nanochat/synaptic.py:2067 |
+| `router_contrastive_push` | `0.1` | LIVE |  | bio_inspired_nanochat/synaptic.py:2067 |
 
 ### `genetics` (1/1 live)
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `xi_dim` | `4` | LIVE |  | bio_inspired_nanochat/synaptic.py:1932 |
+| `xi_dim` | `4` | LIVE |  | bio_inspired_nanochat/synaptic.py:1940 |
 
 ### `toggle` (4/4 live)
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `enable_presyn` | `True` | LIVE |  | bio_inspired_nanochat/synaptic.py:713 |
-| `enable_hebbian` | `True` | LIVE |  | bio_inspired_nanochat/synaptic.py:1252 |
-| `enable_metabolism` | `True` | LIVE |  | bio_inspired_nanochat/synaptic.py:1983 |
-| `use_flex_attention` | `False` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:186 |
+| `enable_presyn` | `True` | LIVE |  | bio_inspired_nanochat/synaptic.py:721 |
+| `enable_hebbian` | `True` | LIVE |  | bio_inspired_nanochat/synaptic.py:1260 |
+| `enable_metabolism` | `True` | LIVE |  | bio_inspired_nanochat/synaptic.py:1991 |
+| `use_flex_attention` | `False` | LIVE |  | bio_inspired_nanochat/ablation_registry.py:196 |
 
 ### `native_toggle` (1/1 live)
 
 | Field | Default | Status | Tuned | Read at |
 |---|---|---|---|---|
-| `native_genetics` | `False` | LIVE |  | bio_inspired_nanochat/synaptic.py:1994 |
+| `native_genetics` | `False` | LIVE |  | bio_inspired_nanochat/synaptic.py:2002 |
 
 ---
 *Status = LIVE when read by a runtime module (`bio_inspired_nanochat/**` or the Rust kernel), DEAD otherwise. “Read at” shows the first runtime/Rust read site; full evidence is in the JSON.*
