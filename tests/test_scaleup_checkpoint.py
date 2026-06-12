@@ -60,19 +60,26 @@ def test_rng_capture_restore_is_reproducible():
 def test_prune_keeps_last_k_and_best(tmp_path):
     d = str(tmp_path)
     for s in (10, 20, 30, 40, 50):
+        # rank-0 model/meta + two ranks' optim/train shards (mimic a 2-GPU run).
         save_checkpoint(d, s, {"w": torch.zeros(2)}, {"o": torch.zeros(1)},
                         {"model_config": {}}, rank=0, train_state={"rng": capture_rng_state()})
+        save_checkpoint(d, s, {"w": torch.zeros(2)}, {"o": torch.zeros(1)},
+                        {"model_config": {}}, rank=1, train_state={"rng": capture_rng_state()})
     assert list_checkpoint_steps(d) == [10, 20, 30, 40, 50]
-    pruned = prune_checkpoints(d, keep_last=2, best_step=10, rank=0)
+    pruned = prune_checkpoints(d, keep_last=2, best_step=10)
     assert set(pruned) == {20, 30}
     assert list_checkpoint_steps(d) == [10, 40, 50]
-    # The pruned steps' optim/meta/train artifacts are gone too.
+    # The pruned steps' artifacts are gone for EVERY rank (no orphaned partial checkpoint).
     for s in (20, 30):
-        assert not os.path.exists(os.path.join(d, f"optim_{s:06d}_rank0.pt"))
-        assert not os.path.exists(os.path.join(d, f"train_{s:06d}_rank0.pt"))
-    # Kept steps retain all artifacts.
+        for r in (0, 1):
+            assert not os.path.exists(os.path.join(d, f"optim_{s:06d}_rank{r}.pt"))
+            assert not os.path.exists(os.path.join(d, f"train_{s:06d}_rank{r}.pt"))
+        assert not os.path.exists(os.path.join(d, f"model_{s:06d}.pt"))
+    # Kept steps retain all ranks' artifacts.
     for s in (10, 40, 50):
         assert os.path.exists(os.path.join(d, f"meta_{s:06d}.json"))
+        for r in (0, 1):
+            assert os.path.exists(os.path.join(d, f"optim_{s:06d}_rank{r}.pt"))
 
 
 def _train_step(model, opt, x, y):

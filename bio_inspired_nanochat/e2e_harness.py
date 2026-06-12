@@ -191,12 +191,20 @@ def _sample_continuation(model: torch.nn.Module, cfg: E2EConfig, n_new: int = 16
     return out
 
 
-def _fast_weight_fingerprint(model: torch.nn.Module) -> float:
-    """Sum of L2 norms of fast-weight params (the online-adapting Hebbian weights)."""
+def _hebbian_state_fingerprint(model: torch.nn.Module) -> float:
+    """Sum of L2 norms of the ONLINE Hebbian state buffers (eligibility traces + accumulators).
+
+    NB: this must read *buffers*, not parameters. The ``w_fast``/``post.fast`` weights are
+    gradient-trained ``nn.Parameter``s that AdamW moves every step regardless of any bio
+    mechanism — so measuring them would make "mechanism engaged" trivially true even with
+    Hebbian disabled. The genuinely-online state lives in the ``u_buf``/``v_buf`` eligibility
+    traces and the Hebbian accumulators, which stay exactly zero when ``enable_hebbian=False``
+    and grow when the mechanism runs (verified in tests/test_scaleup_e2e.py).
+    """
     total = 0.0
-    for n, p in model.named_parameters():
-        if "fast" in n.lower():
-            total += float(p.detach().float().norm().item())
+    for n, b in model.named_buffers():
+        if any(k in n.lower() for k in ("u_buf", "v_buf", "hebb")):
+            total += float(b.detach().float().norm().item())
     return total
 
 
@@ -252,7 +260,7 @@ def run_e2e(
         tensorboard=False,
         provenance={"synapses": cfg.synapses, "n_layer": cfg.n_layer, "seed": cfg.seed},
     )
-    fp_start = _fast_weight_fingerprint(model)
+    fp_start = _hebbian_state_fingerprint(model)
 
     losses: list[float] = []
     grad_norms: list[float] = []
@@ -275,6 +283,10 @@ def run_e2e(
             if verbose and (step % max(1, cfg.steps // 8) == 0 or step == cfg.steps - 1):
                 _logger.info(f"[e2e] step {step:03d}/{cfg.steps} loss={lval:.4f} |grad|={gnorm:.3f}")
 
+        # Capture the Hebbian online-state fingerprint NOW, before the checkpoint probe
+        # below calls reset_sequence_state() (which clears the eligibility traces).
+        fp_end = _hebbian_state_fingerprint(model)
+
         # --- post-run probes -------------------------------------------------
         # A degenerate/diverged model (e.g. the NaN self-test) must yield FAILED
         # invariants, never crash the harness — catching is part of the job.
@@ -289,7 +301,6 @@ def run_e2e(
         except Exception as e:
             sample = []  # empty -> generation_nondegenerate fails (0 distinct tokens)
             _logger.warning(f"[e2e] generation probe raised (treated as degenerate): {e}")
-        fp_end = _fast_weight_fingerprint(model)
         max_abs = _max_abs_param(model)
         nonfinite = _any_nonfinite_param(model)
     finally:
@@ -310,7 +321,7 @@ def run_e2e(
             "initial_loss": losses[0] if losses else None,
             "final_loss": losses[-1] if losses else None,
             "max_grad_norm": max(grad_norms) if grad_norms else None,
-            "fast_weight_delta": fp_end - fp_start,
+            "hebbian_delta": fp_end - fp_start,
             "max_abs_param": max_abs,
             "n_invariants": len(invariants),
             "n_failed": sum(1 for r in invariants if not r.passed),
@@ -420,8 +431,8 @@ def _invariant_battery(
         engaged = delta > 1e-9
         out.append(InvariantResult(
             "mechanism_engaged", engaged, delta,
-            f"fast-weight fingerprint moved by {delta:.3e}" if engaged
-            else "fast-weights did not adapt (mechanism may be off)",
+            f"online Hebbian state grew by {delta:.3e}" if engaged
+            else "online Hebbian state did not move (enable_hebbian off, or mechanism inert)",
         ))
         stable = math.isfinite(max_abs) and max_abs <= cfg.param_absmax_bound
         out.append(InvariantResult(
@@ -445,7 +456,7 @@ def _log_report(report: E2EReport) -> None:
 
     _logger.info(
         f"[e2e] loss {_fmt(s['initial_loss'], '.4f')} -> {_fmt(s['final_loss'], '.4f')} | "
-        f"max|grad|={_fmt(s['max_grad_norm'], '.3f')} | fast-weight Δ={_fmt(s['fast_weight_delta'], '.3e')}"
+        f"max|grad|={_fmt(s['max_grad_norm'], '.3f')} | Hebbian Δ={_fmt(s['hebbian_delta'], '.3e')}"
     )
 
 

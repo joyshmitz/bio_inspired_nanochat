@@ -74,3 +74,17 @@ matching the strict checkpoint name pattern in the given dir, and logs every del
 
 Wired into `scripts/base_train.py`: `save_checkpoint(..., train_state={"rng": capture_rng_state(), "step": step})`
 on save; `restore_rng_state(train_state["rng"])` on `--resume_from_step`.
+
+## Caveats
+
+- **RNG blobs load on CPU.** `load_checkpoint` loads the `train_state` RNG blob with
+  `map_location="cpu"` regardless of the compute device — torch's RNG `ByteTensor`s are CPU
+  tensors and `torch.set_rng_state` rejects a moved/retyped copy, so loading them onto CUDA
+  would crash a GPU resume. `restore_rng_state` routes the per-GPU CUDA RNG sub-state to the
+  device itself via `torch.cuda.set_rng_state_all`.
+- **`torch.compile` is not covered by the bit-comparable test.** `base_train` `torch.compile`s
+  the model; the resume reproducibility test (`test_resume_is_bit_comparable`) uses an
+  *uncompiled* model. `torch.compile` functionalizes RNG and can change the RNG semantics of
+  stochastic ops, so a compiled resumed run may differ from a compiled uninterrupted run even
+  with RNG restored. The mechanism (model + optimizer + RNG capture/restore) is proven
+  bit-comparable uncompiled; compiled resume is "best effort" until a compiled e2e test exists.

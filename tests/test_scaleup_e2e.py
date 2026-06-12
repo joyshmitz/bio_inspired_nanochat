@@ -42,6 +42,26 @@ def test_e2e_vanilla_known_good_passes(tmp_path):
 
 
 @pytest.mark.e2e
+def test_e2e_mechanism_engaged_is_load_bearing(tmp_path):
+    """With Hebbian disabled, mechanism_engaged must FAIL while everything else passes.
+
+    This is the test that proves the invariant actually measures the online Hebbian
+    mechanism (the eligibility buffers stay zero when enable_hebbian=False) rather than
+    the gradient-trained w_fast weights (which AdamW moves regardless).
+    """
+    cfg = E2EConfig(synapses=True, steps=80, seed=1234, syn_overrides={"enable_hebbian": False})
+    report = run_e2e(cfg, run_dir=tmp_path, verbose=False)
+    failed = {r.name for r in report.failures()}
+    assert "mechanism_engaged" in failed, (
+        "mechanism_engaged should fail when Hebbian is off — otherwise it is not "
+        "actually measuring the mechanism. Failures: " + str(failed)
+    )
+    # The rest of the run is still healthy (SGD still trains the slow weights).
+    assert {"loss_finite", "params_finite", "grad_norm_finite_bounded"} & failed == set()
+    assert report.summary["final_loss"] < report.summary["initial_loss"]
+
+
+@pytest.mark.e2e
 def test_e2e_injected_nan_is_caught(tmp_path):
     """A NaN injected mid-training must trip the finite/divergence invariants."""
     cfg = E2EConfig(synapses=True, steps=60, inject_nan_at=20, seed=1234)

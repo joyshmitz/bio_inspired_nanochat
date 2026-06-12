@@ -113,7 +113,15 @@ class DistAdamW(torch.optim.Optimizer):
             for p in group["params"]:
                 grad = p.grad
                 if grad is None:
-                    continue  # frozen / unused param this step
+                    # Skip params with no grad this step (e.g. consistently-frozen ones).
+                    # PRECONDITION under DDP: grad-presence must be SYMMETRIC across ranks —
+                    # every rank must skip the SAME params, or the per-param collectives below
+                    # desync (hang/wrong result). That holds here because grad-None is
+                    # structural (identical model + code on every rank), never data-dependent;
+                    # the AdamW param set (embeddings, norms, biases, kinetics) is used in every
+                    # forward. Data-dependent participation (e.g. MoE experts) goes to DistMuon,
+                    # which hard-requires all grads present.
+                    continue
                 if _is_shardable(grad, world_size):
                     # reduce_scatter_tensor needs a contiguous input; keep it referenced
                     # so a (rare) non-contiguous-grad copy can't be freed mid-flight.

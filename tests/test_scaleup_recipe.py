@@ -60,15 +60,19 @@ def test_synaptic_optimizer_routing():
 
 
 def _wsd_multiplier(it, num_iters, warmup_ratio, warmdown_ratio, final_lr_frac):
-    """Mirrors scripts/base_train.get_lr_multiplier (WSD/trapezoidal)."""
-    warmup = round(warmup_ratio * num_iters)
-    warmdown = round(warmdown_ratio * num_iters)
-    if warmup and it < warmup:
-        return (it + 1) / warmup
-    elif it <= num_iters - warmdown:
+    """Byte-for-byte mirror of scripts/base_train.get_lr_multiplier (WSD/trapezoidal).
+
+    No `warmup and ...` guard — the production code has none; at warmup_iters==0,
+    `it < 0` is simply False for it>=0, so the division is never reached.
+    """
+    warmup_iters = round(warmup_ratio * num_iters)
+    warmdown_iters = round(warmdown_ratio * num_iters)
+    if it < warmup_iters:
+        return (it + 1) / warmup_iters
+    elif it <= num_iters - warmdown_iters:
         return 1.0
     else:
-        progress = (num_iters - it) / warmdown
+        progress = (num_iters - it) / warmdown_iters
         return progress * 1.0 + (1 - progress) * final_lr_frac
 
 
@@ -86,3 +90,16 @@ def test_wsd_schedule_shape():
     # (it reaches exactly final_lr_frac at it == num_iters), and the ramp is monotone down.
     assert 0.0 < f(n - 1) < 0.01
     assert f(900) > f(950) > f(n - 1), "warmdown must be monotonically decreasing"
+
+
+@pytest.mark.unit
+def test_wsd_schedule_no_warmup_is_production_default():
+    """warmup_ratio=0.0 is the base_train default: no warmup, no ZeroDivisionError, peak from step 0."""
+    n = 1000
+
+    def f(it):
+        return _wsd_multiplier(it, n, warmup_ratio=0.0, warmdown_ratio=0.2, final_lr_frac=0.0)
+    # warmup_iters == 0 -> the warmup branch is never taken (no division by zero).
+    assert f(0) == 1.0
+    assert f(500) == 1.0
+    assert 0.0 < f(n - 1) < 0.01

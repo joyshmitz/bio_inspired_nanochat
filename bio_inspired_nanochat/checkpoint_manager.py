@@ -98,7 +98,9 @@ def config_provenance(syn_cfg) -> dict:
 # ``os.replace`` it into place (atomic on POSIX), so any reader sees either the old
 # complete file or the new complete file — never a partial one. Stray ``*.tmp`` files
 # from a crash are ignored by the loaders (which open the exact final names).
-_CKPT_RE = re.compile(r"^(model|meta|optim|train)_(\d{6})(?:_rank\d+)?\.(pt|json)$")
+# {step:06d} pads to >=6 digits, so allow 6 OR MORE (a run past 1e6 steps must still
+# be seen by rotation, else the disk silently fills — the very thing rotation prevents).
+_CKPT_RE = re.compile(r"^(model|meta|optim|train)_(\d{6,})(?:_rank\d+)?\.(pt|json)$")
 
 
 def _atomic_torch_save(obj, path: str) -> None:
@@ -180,8 +182,11 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
     bias, neuromod EMAs, divergence-guard last-good). See docs/scale_up_checkpointing.md
     for the full persistence contract (and what is safely *rebuilt* rather than saved).
     """
+    # Every rank ensures the directory exists BEFORE any rank writes: non-zero ranks
+    # write their own optim/train files below, and there is no barrier guaranteeing rank 0
+    # has created the dir first. makedirs(exist_ok=True) is idempotent and race-safe.
+    os.makedirs(checkpoint_dir, exist_ok=True)
     if rank == 0:
-        os.makedirs(checkpoint_dir, exist_ok=True)
         # Save the model state parameters (atomic).
         model_path = os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
         _atomic_torch_save(model_data, model_path)
@@ -227,9 +232,13 @@ def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0, 
         meta_data = json.load(f)
     if load_train_state:
         train_path = os.path.join(checkpoint_dir, f"train_{step:06d}_rank{rank:d}.pt")
-        # RNG state is tensor-encoded by capture_rng_state(), so the safe default loads it.
+        # ALWAYS load RNG state onto CPU, regardless of the compute device: torch's RNG
+        # ByteTensors are CPU tensors and torch.set_rng_state rejects a moved/typed copy
+        # (it would crash a GPU resume). restore_rng_state() routes the CUDA RNG sub-state
+        # to the GPU itself via torch.cuda.set_rng_state_all. Tensor-encoded by
+        # capture_rng_state() so the safe weights_only=True default loads it.
         train_state = (
-            torch.load(train_path, map_location=device, weights_only=True)
+            torch.load(train_path, map_location="cpu", weights_only=True)
             if os.path.exists(train_path) else None
         )
         return model_data, optimizer_data, meta_data, train_state
@@ -240,20 +249,22 @@ def list_checkpoint_steps(checkpoint_dir: str) -> list[int]:
     """Sorted ascending list of steps that have a saved ``model_*.pt``."""
     steps = []
     for f in glob.glob(os.path.join(checkpoint_dir, "model_*.pt")):
-        m = re.match(r"model_(\d{6})\.pt$", os.path.basename(f))
+        m = re.match(r"model_(\d{6,})\.pt$", os.path.basename(f))
         if m:
             steps.append(int(m.group(1)))
     return sorted(steps)
 
 
-def prune_checkpoints(checkpoint_dir: str, keep_last: int, *, best_step: Optional[int] = None, rank: int = 0) -> list[int]:
+def prune_checkpoints(checkpoint_dir: str, keep_last: int, *, best_step: Optional[int] = None) -> list[int]:
     """Rotate checkpoints: keep the ``keep_last`` most recent steps + ``best_step``.
 
     Disk on a long run is finite; without rotation a multi-day run fills the volume and
-    crashes. This deletes the model/meta/optim/train artifacts of *superseded* steps only,
-    and only files matching the strict checkpoint name pattern in ``checkpoint_dir`` — it
-    never touches anything else. Opt-in: the caller passes an explicit ``keep_last``.
-    Returns the list of pruned steps. Every deletion is logged.
+    crashes. For each *superseded* step this deletes the **complete** checkpoint — the
+    rank-0 model/meta AND every rank's optim/train shard (globbed by ``*_rank*``) — so it
+    never leaves an inconsistent partial checkpoint behind, and it can be called once
+    (e.g. on rank 0) to clean a whole DDP run. Only files matching the strict checkpoint
+    name pattern in ``checkpoint_dir`` are touched. Opt-in: the caller passes an explicit
+    ``keep_last``. Returns the list of pruned steps. Every deletion is logged.
     """
     if keep_last < 1:
         raise ValueError(f"keep_last must be >= 1, got {keep_last}")
@@ -263,9 +274,14 @@ def prune_checkpoints(checkpoint_dir: str, keep_last: int, *, best_step: Optiona
         keep.add(int(best_step))
     pruned = [s for s in steps if s not in keep]
     for s in pruned:
-        for name in (f"model_{s:06d}.pt", f"meta_{s:06d}.json",
-                     f"optim_{s:06d}_rank{rank:d}.pt", f"train_{s:06d}_rank{rank:d}.pt"):
-            path = os.path.join(checkpoint_dir, name)
+        paths = [
+            os.path.join(checkpoint_dir, f"model_{s:06d}.pt"),
+            os.path.join(checkpoint_dir, f"meta_{s:06d}.json"),
+        ]
+        # optim/train are per-rank; remove every rank's shard for this superseded step.
+        paths += glob.glob(os.path.join(checkpoint_dir, f"optim_{s:06d}_rank*.pt"))
+        paths += glob.glob(os.path.join(checkpoint_dir, f"train_{s:06d}_rank*.pt"))
+        for path in paths:
             # Defensive: only ever remove files matching the checkpoint pattern.
             if os.path.exists(path) and _CKPT_RE.match(os.path.basename(path)):
                 os.remove(path)
