@@ -1,0 +1,231 @@
+"""
+Wiring the differentiable synaptic recurrence into the model attention forward (bead hwxb.4.6).
+
+The yw9 primitives (``release_canonical(differentiable=True)``, ``chunked_recurrence``,
+``LearnableKinetics``) existed but were NOT on the live training path: the attention forward called
+``release_canonical`` once over the whole sequence with the default ``differentiable=False``, so
+(a) the recurrence was detached and (b) — even differentiable — a single fresh-state call only
+trains ``alpha_ca`` (the decay kinetics ``rho_c``/``rho_b`` multiply the zero-initialised state, so
+they need accumulation across steps to see any gradient). hwxb.4.6 adds a config-gated, default-off
+``differentiable_recurrence`` that routes the attention bias through a CAUSAL, chunked-TBPTT
+recurrence over query blocks, so the learnable kinetics get a real gradient in a real run.
+
+These tests lock the wiring contract:
+  1. default-off is byte-identical to today's single non-causal call,
+  2. the ``differentiable`` flag changes only gradients, never forward values (parity),
+  3. ``recurrence_block_size >= seq_len`` collapses to the single call exactly,
+  4. the decay kinetics receive gradient ONLY when the wiring is on (the headline),
+  5. all kinetic gradients are finite, including under bf16,
+  6. an analytic-vs-numeric gradcheck on a decay parameter through the wired block,
+  7. the validator rejects the foot-gun configs.
+
+Run:  pytest tests/test_diff_recurrence_wiring.py -v
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _bio_testkit import make_tiny_synaptic, random_tokens  # noqa: E402
+
+from bio_inspired_nanochat.ablation_registry import validate_config  # noqa: E402
+from bio_inspired_nanochat.synaptic import SynapticConfig  # noqa: E402
+
+pytestmark = pytest.mark.unit
+
+KIN = "h.0.attn.attn.pre.kinetics.theta_"  # prefix of the layer-0 learnable kinetic Parameters
+
+
+def _model(*, diff_rec: bool, block: int = 8, chunk_len: int = 0, seq: int = 48, seed: int = 3,
+           train: bool = False, learnable: bool = True):
+    syn = SynapticConfig(
+        learnable_kinetics=learnable,
+        differentiable_recurrence=diff_rec,
+        recurrence_block_size=block,
+        recurrence_chunk_len=chunk_len,
+    )
+    return make_tiny_synaptic(seed=seed, train=train, sequence_len=seq, syn_cfg=syn)
+
+
+def _kinetic_grads(model) -> dict[str, float]:
+    out = {}
+    for name, p in model.named_parameters():
+        if name.startswith(KIN):
+            out[name[len(KIN):]] = 0.0 if p.grad is None else p.grad.abs().sum().item()
+    return out
+
+
+def _backward_loss(model, seq=48, seed=5):
+    x = random_tokens(2, seq, 97, seed=seed)
+    y = random_tokens(2, seq, 97, seed=seed + 1)
+    _, loss = model(x, y, train_mode=True)
+    model.zero_grad(set_to_none=True)
+    loss.backward()
+    return loss
+
+
+# --------------------------------------------------------------------------- #
+# 1. DEFAULT-OFF is byte-identical to the legacy single non-causal call.
+# --------------------------------------------------------------------------- #
+def test_flag_off_is_byte_identical_to_legacy_single_call():
+    x = random_tokens(2, 48, 97, seed=5)
+    # `differentiable_recurrence=False` must take the exact same code path as a config that never
+    # set the field (the legacy single release_canonical call).
+    m_off = _model(diff_rec=False)
+    m_legacy = make_tiny_synaptic(seed=3, train=False, sequence_len=48,
+                                  syn_cfg=SynapticConfig(learnable_kinetics=True))
+    with torch.no_grad():
+        a, _ = m_off(x, None, train_mode=False)
+        b, _ = m_legacy(x, None, train_mode=False)
+    assert torch.equal(a, b), "default-off wiring must be byte-identical to the legacy path"
+
+
+# --------------------------------------------------------------------------- #
+# 2. The differentiable flag changes ONLY gradients, not forward values.
+#    (Fresh identical models so the in-place ema_e buffer evolves identically.)
+# --------------------------------------------------------------------------- #
+def test_differentiable_flag_changes_only_gradients_not_values():
+    x = random_tokens(2, 48, 97, seed=5)
+    m_nograd = _model(diff_rec=True)
+    m_grad = _model(diff_rec=True)  # same seed -> identical init + ema_e start
+    with torch.no_grad():
+        lo_nograd, _ = m_nograd(x, None, train_mode=False)
+    lo_grad, _ = m_grad(x, None, train_mode=False)  # grad enabled -> differentiable=True path
+    assert torch.equal(lo_nograd, lo_grad), "forward value must not depend on grad-tracking"
+
+
+def test_enabling_wiring_changes_the_computation_to_causal():
+    # Sanity that the flag is not a silent no-op: the causal chunked recurrence differs from the
+    # non-causal single-call snapshot (later queries see vesicle depletion from earlier ones).
+    x = random_tokens(2, 48, 97, seed=5)
+    m_on = _model(diff_rec=True, block=8)
+    m_off = _model(diff_rec=False)
+    with torch.no_grad():
+        a, _ = m_on(x, None, train_mode=False)
+        b, _ = m_off(x, None, train_mode=False)
+    assert (a - b).abs().max().item() > 1e-4, "causal recurrence must differ from the snapshot"
+
+
+# --------------------------------------------------------------------------- #
+# 3. block_size >= seq_len => one block => exactly the single non-causal call.
+# --------------------------------------------------------------------------- #
+def test_block_size_ge_seqlen_recovers_single_call_exactly():
+    x = random_tokens(2, 48, 97, seed=5)
+    m_block = _model(diff_rec=True, block=512)  # one block covers the whole sequence
+    m_off = _model(diff_rec=False)
+    with torch.no_grad():
+        a, _ = m_block(x, None, train_mode=False)
+        b, _ = m_off(x, None, train_mode=False)
+    assert torch.equal(a, b), "a single block must reduce to the single release_canonical call"
+
+
+# --------------------------------------------------------------------------- #
+# 4. THE HEADLINE: the decay kinetics receive gradient ONLY when the wiring is on.
+# --------------------------------------------------------------------------- #
+def test_decay_kinetics_get_gradient_only_when_wired():
+    g_off = _kinetic_grads(_backward_loss_model(diff_rec=False, seq=64))
+    g_on = _kinetic_grads(_backward_loss_model(diff_rec=True, block=8, seq=64))
+    # Single-call snapshot: the calcium DECAY gets exactly zero gradient.
+    assert g_off["rho_c"] == 0.0, f"legacy path must not train the calcium decay, got {g_off['rho_c']}"
+    # Wired causal recurrence: the calcium decay AND the influx gain both get gradient.
+    assert g_on["rho_c"] > 0.0, "the wiring must give the calcium decay a nonzero gradient"
+    assert g_on["alpha_ca"] > 0.0, "the influx gain must also receive gradient"
+
+
+def _backward_loss_model(*, diff_rec, block=8, seq=64):
+    m = _model(diff_rec=diff_rec, block=block, seq=seq, train=True)
+    _backward_loss(m, seq=seq)
+    return m
+
+
+def test_all_kinetic_gradients_are_finite():
+    g = _kinetic_grads(_backward_loss_model(diff_rec=True, block=8, seq=64))
+    assert g, "expected layer-0 kinetic gradients to be present"
+    for name, val in g.items():
+        assert val == val and abs(val) < float("inf"), f"kinetic grad {name} not finite: {val}"
+
+
+# --------------------------------------------------------------------------- #
+# 5. bf16 forward+backward through the wired recurrence stays finite.
+# --------------------------------------------------------------------------- #
+def test_bf16_forward_backward_is_finite():
+    m = _model(diff_rec=True, block=8, seq=64, train=True).to(torch.bfloat16)
+    x = random_tokens(2, 64, 97, seed=5)
+    y = random_tokens(2, 64, 97, seed=6)
+    _, loss = m(x, y, train_mode=True)
+    assert torch.isfinite(loss), f"bf16 loss must be finite, got {loss}"
+    m.zero_grad(set_to_none=True)
+    loss.backward()
+    grads = _kinetic_grads(m)
+    assert grads, "expected kinetic gradients under bf16"
+    for name, val in grads.items():
+        assert val == val and abs(val) < float("inf"), f"bf16 kinetic grad {name} not finite: {val}"
+
+
+# --------------------------------------------------------------------------- #
+# 6. Analytic-vs-numeric gradcheck on the calcium decay through the wired block.
+#    (Central finite difference on theta_rho_c; the through-model autograd grad must match.)
+# --------------------------------------------------------------------------- #
+def test_calcium_decay_gradient_matches_finite_difference():
+    seq = 64
+
+    def loss_at(theta_delta: float) -> float:
+        m = _model(diff_rec=True, block=8, seq=seq, train=False)  # train=False -> deterministic
+        kin = m.h[0].attn.attn.pre.kinetics
+        with torch.no_grad():
+            kin.theta_rho_c.add_(theta_delta)
+        x = random_tokens(1, seq, 97, seed=5)
+        y = random_tokens(1, seq, 97, seed=6)
+        _, loss = m(x, y, train_mode=False)
+        return float(loss.detach())
+
+    # Analytic gradient through the model.
+    m = _model(diff_rec=True, block=8, seq=seq, train=False)
+    kin = m.h[0].attn.attn.pre.kinetics
+    x = random_tokens(1, seq, 97, seed=5)
+    y = random_tokens(1, seq, 97, seed=6)
+    _, loss = m(x, y, train_mode=False)
+    m.zero_grad(set_to_none=True)
+    loss.backward()
+    analytic = float(kin.theta_rho_c.grad)
+
+    eps = 1e-3
+    numeric = (loss_at(eps) - loss_at(-eps)) / (2 * eps)
+    assert abs(analytic) > 0.0, "the calcium decay must have a nonzero gradient through the model"
+    # Loose tolerance: tiny CPU fp32 model, finite-difference noise; we are checking sign+magnitude.
+    assert abs(analytic - numeric) <= 0.05 * max(1.0, abs(numeric)) + 1e-3, (
+        f"analytic {analytic} vs numeric {numeric} disagree beyond tolerance"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 7. The validator catches the foot-gun configs.
+# --------------------------------------------------------------------------- #
+def test_validator_flags_differentiable_recurrence_without_kinetics():
+    errors, _ = validate_config(
+        SynapticConfig(differentiable_recurrence=True, learnable_kinetics=False)
+    )
+    assert any("differentiable_recurrence" in e and "learnable_kinetics" in e for e in errors)
+
+
+def test_validator_range_checks_block_and_chunk():
+    assert validate_config(
+        SynapticConfig(learnable_kinetics=True, differentiable_recurrence=True,
+                       recurrence_block_size=0)
+    )[0]
+    assert validate_config(
+        SynapticConfig(learnable_kinetics=True, differentiable_recurrence=True,
+                       recurrence_chunk_len=-1)
+    )[0]
+
+
+def test_default_config_does_not_engage_the_recurrence():
+    cfg = SynapticConfig()
+    assert cfg.differentiable_recurrence is False
+    errors, warnings = validate_config(cfg)
+    assert errors == [] and warnings == []
