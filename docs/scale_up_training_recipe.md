@@ -49,6 +49,14 @@ trains better with a smaller batch at fixed token budget. The effective batch do
 > without it `D1` is ≈ **133M** (untied: ≈84M of separate `wte`+`lm_head`). Scale-up runs set the
 > flag; size/throughput estimates below assume tied (~91M).
 
+> **Predicted memory budget** (`hwxb.2.2`, via `python -m scripts.scale_memory --depth 10 --seq 1024
+> --batch 16 --world-size 2 --tie-embeddings [--synapses]`): per-rank persistent footprint
+> (params + optimizer moments) ≈ **0.6 GB** vanilla / **0.8 GB** synaptic; with the rough activation
+> estimate the total is ≈ **3.7–3.9 GB**, leaving **~20 GB headroom** on a 24 GB 4090 — ample room for
+> the synaptic per-key state when Phase 3 turns mechanisms on. The persistent terms are exact
+> (CPU-computable, unit-tested); the activation/synaptic-state terms are rough estimates that the
+> *measured* on-4090 table (`hwxb.2.10`) will pin down.
+
 ## Horizon — the equal-compute basis (FIXED HERE)
 
 The ablation equalizes on **token budget** (Phase-0 §3.2). The headline `D1` comparison is fixed at:
