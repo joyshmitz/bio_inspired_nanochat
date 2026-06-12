@@ -106,9 +106,10 @@ export CUDA_VISIBLE_DEVICES=0,1
 ```
 
 If you hit P2P instability on a particular motherboard, fall back to `NCCL_P2P_DISABLE=1`
-(slower, but staging through host memory is robust). The model is intentionally small
-(~90M params, `D1`) so the per-step all-reduce volume (~180 MB) overlaps with backward and
-PCIe stays out of the critical path.
+(slower, but staging through host memory is robust). The model is intentionally small (`D1`:
+~133M params untied today, ~91M once the Phase-0 embedding tying lands — `hwxb.2.9`), so the
+per-step bf16 gradient all-reduce volume (~266 MB untied / ~182 MB tied) overlaps with backward
+and PCIe stays out of the critical path.
 
 ## 6. Launch recipe
 

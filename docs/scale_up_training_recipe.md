@@ -13,10 +13,10 @@
 |------|-------|--------------------|
 | Optimizers | **AdamW** (embeddings, `lm_head`, all 1-D/0-D params) + **Muon** (2-D matrices) | the repo's proven split (`gpt.py`/`gpt_synaptic.py` `setup_optimizers`) |
 | AdamW betas / eps | `(0.8, 0.95)` / `1e-10` | nanochat default |
-| `embedding_lr` | `0.2` × `s` | base × d-model scale |
-| `unembedding_lr` | `0.004` × `s` | base × d-model scale |
-| `matrix_lr` (Muon) | `0.02` × `s` | base × d-model scale |
-| d-model LR scale `s` | `(model_dim/768)**-0.5` = **1.095** for `D1` (model_dim 640) | `setup_optimizers` scales AdamW LRs ∝ 1/√(d/768) |
+| `embedding_lr` | `0.2` × `s` | AdamW; base × d-model scale |
+| `unembedding_lr` | `0.004` × `s` | AdamW; base × d-model scale |
+| `matrix_lr` (Muon) | `0.02` (**unscaled**) | Muon LR is used as-is — only the AdamW groups get the d-model scale (`gpt.py` `setup_optimizers`) |
+| d-model LR scale `s` | `(model_dim/768)**-0.5` = **1.095** for `D1` (model_dim 640) | `setup_optimizers` scales the **AdamW** LRs ∝ 1/√(d/768) (NOT Muon) |
 | Muon momentum | warms **0.85 → 0.95 over the first 300 steps** | `get_muon_momentum` |
 | Weight decay | `0.0` | nanochat default (the bio params want freedom to move) |
 | Grad clip | **1.0** | `clip_grad_norm_`; with the divergence guard below |
@@ -40,9 +40,15 @@
 
 `base_train.py` derives `grad_accum_steps = total_batch_size / (device_batch_size × seq_len × world_size)`
 and asserts divisibility. For `D1`: `262144 / (16 × 1024 × 2) = 8`. We use **0.25M tokens/step** for the
-~91M `D1` model (smaller than nanochat's 0.5M default, which targets larger models) — a small model
+`D1` model (smaller than nanochat's 0.5M default, which targets larger models) — a small model
 trains better with a smaller batch at fixed token budget. The effective batch doubles for free with the
 2nd GPU (DDP averages gradients; see `docs/scale_up_ddp.md`).
+
+> **Param count caveat:** the Phase-0 decision is to **tie** `wte`/`lm_head`, which makes `D1` ≈ **91M**
+> params (see `scale_up_phase0_decisions.md` §2.1). Tying is a *pending prerequisite* (`hwxb.2.9`); the
+> code currently ships **untied** embeddings (`gpt.py`), so at `--depth=10`, vocab 65536, dim 640 the
+> *actual* model is ≈ **133M** params (≈49M transformer + ≈84M untied embeddings). Until tying lands,
+> size/throughput estimates should use ~133M, not 91M.
 
 ## Horizon — the equal-compute basis (FIXED HERE)
 
@@ -50,9 +56,9 @@ The ablation equalizes on **token budget** (Phase-0 §3.2). The headline `D1` co
 
 - **Headline budget: 500M tokens** (~1900 steps at 0.25M tokens/step) — "Medium" in `eval_benchmark_matrix.md`.
 - Fast-iteration: **100M tokens** ("Short", ~380 steps) for quick signal / regressions.
-- Chinchilla-optimal for a 91M model is ~1.8B tokens; 500M is a deliberate, fixed, equal-compute
-  basis (both vanilla and bio train for **exactly** this budget; bio simply costs more wall-clock,
-  reported separately). Do **not** change it per-arm — that would break the comparison.
+- Chinchilla-optimal for a small (~90–130M) model is ~2–2.6B tokens; 500M is a deliberate, fixed,
+  equal-compute basis (both vanilla and bio train for **exactly** this budget; bio simply costs more
+  wall-clock, reported separately). Do **not** change it per-arm — that would break the comparison.
 
 ## Validation (e2e harness LR sweep)
 
