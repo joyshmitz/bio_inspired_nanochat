@@ -1,0 +1,156 @@
+# Bio-vs-Vanilla Ablation Matrix — Pre-Registered Experiment Spec (bead `hwxb.5.1`)
+
+This document and its machine-readable twin, `bio_inspired_nanochat/ablation_matrix.py`, define the
+**headline experiment** of the scale-up epic: *does the biology help, and which mechanism?* It is
+**pre-registered** — the configs, seeds, equal-compute budget, metrics, and the decision rule are
+fixed here **before** any 4090 time is spent, so the result cannot be rationalized after the fact.
+
+It builds on, and does not duplicate, the general
+[`docs/eval_benchmark_matrix.md`](eval_benchmark_matrix.md) (metric definitions, preset dimensions,
+the `eval_matrix` harness contract). What this spec adds is the **experimental design** the headline
+verdict needs: the architecture-vs-mechanism anchor, both ablation directions, param-matching,
+staged compute with a GPU-hour gate, and the pinned statistical decision rule.
+
+> The mechanism set, the leave-one-out columns, and the add-one-in columns are **derived from
+> `ablation_registry.MECHANISMS`** in code, so this spec cannot silently drift from what the model
+> actually treats as ablatable. The narrative below mirrors that code; the code is authoritative.
+
+---
+
+## 1) The confound, and the three anchors
+
+`GPTSynaptic` with *every* bio flag off is **still a different architecture** than vanilla `GPT`:
+it carries the presynaptic attention augmentation, the router probe, the per-expert genome `Xi`, and
+the MoE structure. So a naïve `vanilla` vs `bio_all` contrast **confounds the architecture with the
+mechanisms** — a positive result could be the scaffolding, not the biology.
+
+We therefore run **three anchors** and read the experiment as a decomposition:
+
+| Anchor | What it is | Isolates |
+|---|---|---|
+| `vanilla` | standard `GPT`, **param-matched** to `GPTSynaptic` | the silicon baseline |
+| `synaptic_off` | `GPTSynaptic` architecture, **every mechanism off** (byte-identical-default per the unit tests) | the architecture, with no biology |
+| `bio_all` | `GPTSynaptic` with the default synaptic stack on | the full biology |
+
+```
+(synaptic_off − vanilla)   = effect of the synaptic ARCHITECTURE alone
+(mechanism   − synaptic_off) = the CLEAN isolated effect of a mechanism (same arch, one flag flipped)
+(bio_all     − vanilla)    = the TOTAL bio effect
+```
+
+**Param-matching.** The synaptic stack adds parameters, so `vanilla` is matched to `GPTSynaptic` by
+adjusting depth/width (`n_layer`/`n_embd`); the runner records **both** param counts in every summary
+row so the comparison is honest. Without this, a win could be a free-parameter artifact.
+
+---
+
+## 2) The two ablation directions
+
+Derived from the registry, excluding the two **infrastructure** mechanisms (`flex_attention` is
+prefill-only and incompatible with KV-cache decode eval; `native_genetics` needs CUDA) — these are
+performance toggles, not biology.
+
+### Leave-one-out — marginal contribution (primary)
+`bio_all` minus each **default-on** mechanism. Answers "what do we lose by removing X, given the rest?"
+
+`bio_no_presyn`, `bio_no_hebbian`, `bio_no_metabolism`, `bio_no_stochastic_release`, `bio_no_doc2`,
+`bio_no_septin_barrier`, `bio_no_bdnf`.
+
+### Add-one-in — standalone effect (secondary)
+`synaptic_off` plus each **opt-in** mechanism (with its prerequisites turned back on). Answers "what
+does X buy on its own, on the clean architecture anchor?" Because some mechanisms require others, the
+column turns on the whole prerequisite chain (e.g. `add_differentiable_recurrence` also enables
+`learnable_kinetics` and `enable_presyn`); the isolated effect is then read against the matching
+prerequisite-only baseline.
+
+`add_bistable_latch` (needs `enable_hebbian`), `add_learnable_kinetics` (needs `enable_presyn`),
+`add_differentiable_recurrence` (needs `learnable_kinetics`, `enable_presyn`).
+
+Add-one-in is more interpretable for "which mechanism helps"; leave-one-out catches interactions.
+We run both where compute allows; the staging below keeps the cost bounded.
+
+**Total screening columns:** 3 anchors + 7 leave-one-out + 3 add-one-in = **13**.
+
+---
+
+## 3) Seeds, equal-compute budget, metrics
+
+- **Seeds.** Screening `{1337, 1338}`; confirmation `{1337, 1338, 1339}` (≥3 for significance).
+- **Equal compute.** Every cell trains the **same token budget** (equal-compute, not equal-steps —
+  configs differ in throughput). Screening `10M` tokens; confirmation `100M`. The final budget is
+  pinned by the Phase-0 decision rule and the **feasible set from `hwxb.4.5`** (the mechanisms that
+  fit the dual-4090 memory/throughput envelope); this spec is parametric in that set.
+- **Metrics** (per cell; defined in `eval_benchmark_matrix.md`): `val_bpb` (**primary**), `niah_acc`
+  (long-context), `working_memory` (associative recall; honest, may be null), `moe_gini` and
+  `dead_expert_frac` (routing health), plus `tok_per_sec` and `peak_mem_gb` for the equal-compute
+  accounting and feasibility.
+
+---
+
+## 4) Staged compute + the go/no-go gate
+
+Running all 13 columns × 3 seeds at full budget is wasteful if half the mechanisms do nothing.
+
+1. **Screening pass** — all 13 columns × 2 seeds × 10M tokens. Cheap; drops mechanisms that clearly
+   do not move the primary metric.
+2. **Go/no-go gate** (`ablation_matrix.go_no_go`) — before the expensive pass, require:
+   - ≥1 mechanism **survived** screening (else report the null result — the experiment is allowed to
+     say "biology did not help at this scale"), **and**
+   - the estimated GPU-hours of the confirmation pass fit the cap (`DEFAULT_GPU_HOUR_CAP = 72` GPU-h;
+     tune to the allocation). The estimate is `runs × tokens / tok_per_sec`, with `tok_per_sec` from
+     the `hwxb.2.2` measurement (or the planning rule-of-thumb until that exists).
+3. **Confirmation pass** — anchors + survivors only, × 3 seeds × 100M tokens.
+
+Commit the GPU-hour estimate and the gate decision to the run log before the confirmation pass; never
+burn days of 4090 time blindly.
+
+---
+
+## 5) Pre-registered decision rule (consistent with Phase-0)
+
+Evaluated by the stats layer (`bio_inspired_nanochat/eval_stats.py`: `aggregate` + `paired_t_test`
+over per-seed deltas; bead `hwxb.5.3`). **Primary metric: `val_bpb`, lower is better**; all deltas are
+direction-aware (improvement = bpb down).
+
+- A **mechanism "helps"** iff, across the confirmation seeds, its clean isolated contrast
+  (`synaptic_off − add_mechanism`, or `bio_no_X − bio_all` for leave-one-out) is an **improvement**
+  with a paired 95% CI excluding 0, and the paired *t* and Wilcoxon signed-rank agree on direction.
+  Because the contrast is taken against `synaptic_off` (not `vanilla`), a positive architecture effect
+  cannot masquerade as a mechanism win.
+- **"Bio helps" overall** iff `(bio_all − vanilla)` on `val_bpb` is an improvement with a 95% CI
+  excluding 0; the per-mechanism rule then attributes that win.
+- A **null or negative** result is reported honestly.
+
+---
+
+## 6) How to run it
+
+The columns map to `eval_matrix` runs. Existing named presets (`vanilla`, `bio_all`, `bio_no_*`) run
+directly; the new columns (`synaptic_off`, the `add_*` set) are carried as explicit field overrides on
+their base anchor by `ablation_matrix.AblationConfig.build_syn_cfg()`. The dry-run bead (`hwxb.7.4`)
+exercises the full screen→gate→confirm orchestration on tiny models to validate the machinery before
+the real run (`hwxb.5.2`); promoting the new columns to named `ABLATION_PRESETS` entries is a small
+optional follow-up that keeps this matrix decoupled from the registry in the meantime.
+
+```python
+from bio_inspired_nanochat import ablation_matrix as am
+cols = am.screening_columns()                      # the 13 columns
+hours = am.estimate_gpu_hours(cols, am.SCREENING_SEEDS, am.SCREENING_TOKENS, tok_per_sec=measured)
+gate = am.go_no_go(survivors, tok_per_sec=measured)  # gate the confirmation pass
+conf = am.confirmation_columns(survivors)            # anchors + survivors
+```
+
+---
+
+## 7) Known gaps (honest scope)
+
+- **Global neuromodulation (`hy8.1`) and NeuroScore are not yet registered ablation mechanisms**, so
+  they are **not** in this matrix even though the README describes them. Registering them in
+  `ablation_registry.MECHANISMS` (with their prerequisites) is the prerequisite for an `add_neuromod`
+  / `bio_no_neuromod` column. Tracked as a follow-up under the `hwxb.5` phase.
+- **Structural lifecycle** (split/merge) is toggled at the *model* level (`structural_every` /
+  `splitmerge_every`), not via a `SynapticConfig` mechanism flag; `enable_metabolism` covers the
+  per-expert energy dynamics. A dedicated lifecycle on/off column should be added once the runner
+  exposes the model-level toggle to the matrix.
+- The **feasible mechanism set** and the **final token budget** are pinned by `hwxb.4.5`; this spec is
+  parametric in both.
