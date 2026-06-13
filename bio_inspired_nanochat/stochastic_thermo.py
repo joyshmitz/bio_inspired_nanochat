@@ -460,3 +460,96 @@ class StochasticThermoMonitor:
             console.print(t)
         except Exception:  # pragma: no cover - rich is a project dep; stay usable without it
             print("stochastic-thermo monitor summary:", s)
+
+
+# =========================================================================== #
+# Energy-optimal temperature schedule + toggle + deterministic fallback (bead 0642.3.2.2)
+# =========================================================================== #
+@dataclass(frozen=True)
+class ThermoUQConfig:
+    """Toggle + knobs for thermodynamically-calibrated UQ (`thermo_uq`, `hm4.7`). Default-off."""
+
+    enabled: bool = False              # the master toggle; off ⟹ a neutral temperature and no claim
+    ft_tol: float = 0.25               # Crooks FT residual tolerance for the analytic-calibration claim
+    drive_uncertainty_base: float = 1.0  # σ_base for the Landauer schedule
+    ach_gain: float = 1.0              # how strongly ACh scales the effective uncertainty
+
+
+@dataclass(frozen=True)
+class CalibrationVerdict:
+    """The deterministic calibration verdict: analytic FT guarantee, or the empirical-ECE fallback."""
+
+    calibrated: bool          # the FT test passed within tolerance (the analytic guarantee holds)
+    ft_residual: float        # the measured Crooks residual (nan if no symmetric support)
+    bins: int                 # number of populated symmetric FT bins
+    mode: str                 # "analytic_fluctuation_theorem" | "empirical_ece_fallback"
+    reason: str
+
+
+class ThermoUQController:
+    """Energy-optimal release-temperature schedule + the fail-closed calibration gate (`0642.3.2.2`).
+
+    Produces the Landauer-optimal release temperature as a function of the ACh-signaled uncertainty
+    (the schedule), and gates the *analytic calibration claim* on the empirical fluctuation-theorem
+    test: if the release `Σ` histogram obeys the Crooks identity within `ft_tol`, the predictive
+    distribution carries the analytic FT-calibration guarantee; otherwise (the non-Markov /
+    rate-misspecified regime, ledger E1/E3/R) the controller **deterministically falls back** to
+    reporting empirical ECE only and flags the drop. Default-off (`enabled=False`) ⟹ a neutral
+    temperature (1.0) and no calibration claim — the baseline path.
+    """
+
+    def __init__(self, cfg: ThermoUQConfig | None = None) -> None:
+        self.cfg = cfg or ThermoUQConfig()
+
+    def optimal_temperature(self, ach_level: float = 0.0) -> float:
+        """The energy-optimal (Landauer) release temperature for the current ACh/uncertainty signal.
+
+        Neutral (`1.0`) when disabled; otherwise `kT*(ACh) = σ(ACh)/√SNR*` (the `0642.3.1.4` law).
+        """
+        if not self.cfg.enabled:
+            return 1.0
+        return ach_coupled_temperature(
+            self.cfg.drive_uncertainty_base, ach_level, ach_gain=self.cfg.ach_gain
+        )
+
+    def temperature_schedule(self, ach_levels) -> list[float]:
+        """The optimal release temperature over a sequence of per-step ACh/uncertainty signals."""
+        return [self.optimal_temperature(float(a)) for a in ach_levels]
+
+    def calibration_verdict(self, sigma: np.ndarray, **crooks_kw) -> CalibrationVerdict:
+        """Gate the analytic-calibration claim on the empirical FT test (the deterministic fallback).
+
+        `sigma` is the accumulated entropy production of the predictive ensemble (e.g. from a
+        `StochasticThermoMonitor` or the MC release readout). Passes the Crooks detailed-FT test ⟹
+        analytic guarantee; fails (or no symmetric support) ⟹ the empirical-ECE fallback, flagged.
+        """
+        cal = crooks_calibration(np.asarray(sigma, dtype=np.float64), tol=self.cfg.ft_tol, **crooks_kw)
+        if cal.calibrated:
+            return CalibrationVerdict(
+                calibrated=True, ft_residual=cal.max_abs_residual, bins=int(cal.bins.size),
+                mode="analytic_fluctuation_theorem",
+                reason=(f"FT test passed (residual={cal.max_abs_residual:.3g} ≤ {self.cfg.ft_tol:g} on "
+                        f"{cal.bins.size} bins): predictive distribution is FT-calibrated"),
+            )
+        resid = cal.max_abs_residual
+        why = ("no symmetric Σ support (insufficient near-equilibrium data)" if not math.isfinite(resid)
+               else f"FT residual {resid:.3g} > {self.cfg.ft_tol:g} (non-Markov / rate-misspecified)")
+        return CalibrationVerdict(
+            calibrated=False, ft_residual=resid, bins=int(cal.bins.size),
+            mode="empirical_ece_fallback",
+            reason=f"FT test failed — {why}; dropping the analytic claim, report empirical ECE only",
+        )
+
+    def assess(self, currents: np.ndarray, rates: ReleaseRates, *, ach_level: float = 0.0,
+               **crooks_kw) -> dict:
+        """One-shot: the optimal temperature for `ach_level` + the calibration verdict for `currents`."""
+        sigma = entropy_production_samples(np.asarray(currents, dtype=np.float64), rates)
+        verdict = self.calibration_verdict(sigma, **crooks_kw)
+        return {
+            "enabled": self.cfg.enabled,
+            "optimal_temperature": self.optimal_temperature(ach_level),
+            "calibration_mode": verdict.mode,
+            "ft_calibrated": verdict.calibrated,
+            "ft_residual": verdict.ft_residual,
+            "reason": verdict.reason,
+        }

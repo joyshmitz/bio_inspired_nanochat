@@ -230,3 +230,55 @@ def test_monitor_assert_tur_fires_on_a_violation():
     assert not mon.all_currents_satisfy_tur()
     with pytest.raises(AssertionError, match="TUR violated"):
         mon.assert_tur()
+
+
+# =========================================================================== #
+# 0642.3.2.2 / .2.3 — energy-optimal temperature schedule + toggle + fallback
+# =========================================================================== #
+def test_thermo_uq_toggle_off_is_neutral():
+    off = st.ThermoUQController(st.ThermoUQConfig(enabled=False))
+    assert off.optimal_temperature(2.0) == 1.0, "disabled ⟹ neutral temperature (baseline path)"
+    assert off.temperature_schedule([0.0, 1.0, 5.0]) == [1.0, 1.0, 1.0]
+
+
+def test_landauer_temperature_schedule_rises_with_ach():
+    on = st.ThermoUQController(st.ThermoUQConfig(enabled=True, drive_uncertainty_base=1.0, ach_gain=1.0))
+    sched = on.temperature_schedule([0.0, 0.5, 1.0, 2.0])
+    assert all(sched[i] < sched[i + 1] for i in range(len(sched) - 1)), "schedule must rise with ACh"
+    assert sched[0] == pytest.approx(st.landauer_optimal_temperature(1.0))  # neutral ACh ⟹ base law
+
+
+def test_calibration_verdict_analytic_for_real_release():
+    on = st.ThermoUQController(st.ThermoUQConfig(enabled=True))
+    neq = st.ReleaseRates(a=0.6, b=0.4)
+    sig = st.entropy_production_samples(st.simulate_currents(neq, 2.0, 300000, seed=0), neq)
+    v = on.calibration_verdict(sig, min_count=80)
+    assert v.calibrated and v.mode == "analytic_fluctuation_theorem"
+
+
+def test_fallback_triggers_on_non_markov_rate_misspecification():
+    # Ledger E1/E3/R: if Σ is computed with the WRONG affinity (rate misspecification), the empirical
+    # FT fails and the controller deterministically drops the analytic claim → empirical-ECE fallback.
+    on = st.ThermoUQController(st.ThermoUQConfig(enabled=True, ft_tol=0.25))
+    true_rates = st.ReleaseRates(a=0.6, b=0.4)
+    J = st.simulate_currents(true_rates, 2.0, 300000, seed=1)
+    misspecified = st.ReleaseRates(a=0.6, b=0.2)            # wrong recovery rate ⟹ wrong affinity
+    sig_bad = st.entropy_production_samples(J, misspecified)
+    v = on.calibration_verdict(sig_bad, min_count=80)
+    assert not v.calibrated and v.mode == "empirical_ece_fallback"
+    assert "report empirical ECE only" in v.reason
+
+
+def test_fallback_triggers_on_non_ft_distribution():
+    on = st.ThermoUQController(st.ThermoUQConfig(enabled=True, ft_tol=0.25))
+    rng = np.random.default_rng(3)
+    v = on.calibration_verdict(rng.normal(2.0, 1.0, 300000), min_count=80)  # no FT symmetry at all
+    assert not v.calibrated and v.mode == "empirical_ece_fallback"
+
+
+def test_assess_one_shot_reports_temperature_and_mode():
+    on = st.ThermoUQController(st.ThermoUQConfig(enabled=True))
+    neq = st.ReleaseRates(a=0.6, b=0.4)
+    out = on.assess(st.simulate_currents(neq, 2.0, 200000, seed=2), neq, ach_level=1.0, min_count=80)
+    assert {"enabled", "optimal_temperature", "calibration_mode", "ft_calibrated", "ft_residual"} <= set(out)
+    assert out["optimal_temperature"] > st.landauer_optimal_temperature(1.0)  # ACh=1 raises it
