@@ -296,12 +296,37 @@ class Engine:
         return self.model.forward(ids, kv_cache=kv_cache)
 
     @torch.inference_mode()
-    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42, yield_metrics=False):
-        """Same as generate, but does single prefill and then clones the KV cache."""
+    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42,
+                 yield_metrics=False, deliberation=None):
+        """Same as generate, but does single prefill and then clones the KV cache.
+
+        ``deliberation`` (bead r00r.1.2): an optional ``DeliberationConfig`` (or a prebuilt
+        ``DeliberationController``) that turns on free-energy "ponder" — per token, the synaptic state
+        is relaxed by extra free-energy-minimization steps and the resulting effort/confidence modulate
+        the decode temperature (commit when self-consistent, explore when not). Default ``None`` ⟹ the
+        decode path is byte-for-byte the single-step baseline (the deterministic fallback).
+        """
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         device = self.model.get_device()
         rng = torch.Generator(device=device)
         rng.manual_seed(seed)
+
+        # Build the deliberation controller (None ⟹ baseline single-step decode). Lazy import keeps
+        # the metriplectic/numpy stack off engine.py's import path unless deliberation is requested.
+        deliberation_controller = None
+        if deliberation is not None:
+            from bio_inspired_nanochat.deliberation import DeliberationConfig, make_controller
+            deliberation_controller = (
+                make_controller(deliberation) if isinstance(deliberation, DeliberationConfig) else deliberation
+            )
+
+        def _decode_temperature(kv_cache_for_state):
+            """Per-token effective decode temperature; identity (= ``temperature``) without deliberation."""
+            if deliberation_controller is None:
+                return temperature
+            return deliberation_controller.effective_temperature(
+                getattr(kv_cache_for_state, "presyn_state", None), temperature
+            )
 
         # Get the special tokens we need to coordinate the tool use state machine
         def get_special(s):
@@ -376,7 +401,9 @@ class Engine:
                 else:
                     logits = result
                 logits = logits[:, -1, :]  # (B, vocab_size) at last time step
-                next_ids = sample_next_token(logits, rng, temperature, top_k)  # (B, 1)
+                # r00r.1.2: per-token free-energy deliberation modulates the decode temperature
+                # (identity when deliberation is off ⟹ exact single-step baseline).
+                next_ids = sample_next_token(logits, rng, _decode_temperature(kv_cache_decode), top_k)  # (B, 1)
                 sampled_tokens = next_ids[:, 0].tolist()
 
             # Process each row: choose the next token, update state, optional tool use
