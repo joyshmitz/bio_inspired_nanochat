@@ -20,6 +20,7 @@ longer and reads the result.
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass
 
 import numpy as np
@@ -179,6 +180,15 @@ class DeliberationController:
     def f_trajectory(self) -> list[dict]:
         """The per-token F-trajectory + effort log (JSONL-ready dicts)."""
         return [asdict(r) for r in self.records]
+
+    def to_jsonl(self) -> list[str]:
+        """The per-token F-trajectory as JSONL lines — the detailed-logging artifact (`eqyk.2`)."""
+        return [json.dumps(asdict(r), ensure_ascii=False) for r in self.records]
+
+    def write_trajectory(self, path) -> None:
+        """Write the per-token F-trajectory artifact to ``path`` as JSONL (one record per token)."""
+        from pathlib import Path
+        Path(path).write_text("\n".join(self.to_jsonl()) + ("\n" if self.records else ""), encoding="utf-8")
 
     def summary(self) -> dict:
         if not self.records:

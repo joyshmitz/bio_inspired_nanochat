@@ -16,6 +16,8 @@ Run:  pytest tests/test_deliberation.py -v
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -26,6 +28,7 @@ from bio_inspired_nanochat.deliberation import (
     make_controller,
 )
 from bio_inspired_nanochat.engine import Engine
+from bio_inspired_nanochat.metriplectic_integrator import boltzmann_weights, run_monitored
 from bio_inspired_nanochat.torch_imports import torch
 
 
@@ -187,3 +190,59 @@ def test_generate_with_deliberation_runs_and_produces_trajectory():
     summary = controller.summary()
     assert summary["tokens"] == len(controller.records)
     assert 1 <= summary["max_effort"] <= 32, "effort must respect the compute budget"
+
+
+# --------------------------------------------------------------------------- #
+# r00r.1.3 — Lyapunov per-step, halting, energy-sampler distribution, JSONL artifact
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_free_energy_is_nonincreasing_across_deliberation_steps():
+    """The Lyapunov guarantee that makes "think longer" safe: F must not increase, step over step,
+    on the deliberation integrator seeded from a synaptic state."""
+    cfg = DeliberationConfig(enabled=True, dt=0.5)
+    z0 = np.array([1.0, 0.5, 0.0])  # an active synaptic state
+    _traj, monitor = run_monitored(z0, cfg.dt, steps=40, T=cfg.T)
+    f_seq = [r.F for r in monitor.records]
+    assert all(f_seq[i + 1] <= f_seq[i] + 1e-9 for i in range(len(f_seq) - 1)), "F must be non-increasing"
+    assert monitor.free_energy_nonincreasing()
+
+
+@pytest.mark.unit
+def test_halting_distinguishes_convergence_from_budget():
+    easy = DeliberationController(DeliberationConfig(enabled=True, max_iters=128, eps=1e-4))
+    res_conv = easy.ponder(np.array([0.2, 0.1, 0.0]))
+    assert res_conv.halted_converged and res_conv.iters < 128, "an easy state must halt on |ΔF|<eps"
+    tight = DeliberationController(DeliberationConfig(enabled=True, max_iters=3, eps=1e-12))
+    res_budget = tight.ponder(np.array([3.0, 1.0, 0.0]))
+    assert not res_budget.halted_converged and res_budget.iters == 3, "a tiny budget must be hit, not converged"
+
+
+@pytest.mark.unit
+def test_energy_sampler_matches_target_distribution():
+    """Sampling p ∝ exp(−F/kT) must reproduce the Boltzmann weights empirically (a toy case)."""
+    free_energies = np.array([0.0, 1.0, 2.0, 0.5])
+    kT = 0.8
+    w = boltzmann_weights(free_energies, kT=kT)
+    probs = torch.as_tensor(w, dtype=torch.float64)
+    gen = torch.Generator().manual_seed(0)
+    draws = torch.multinomial(probs, num_samples=40000, replacement=True, generator=gen)
+    emp = torch.bincount(draws, minlength=4).double() / 40000.0
+    assert torch.allclose(emp, probs, atol=0.02), f"empirical {emp.tolist()} must match target {probs.tolist()}"
+    # argmin-F (lowest energy) must be the most probable candidate.
+    assert int(probs.argmax()) == int(np.argmin(free_energies))
+
+
+@pytest.mark.e2e
+def test_generation_writes_f_trajectory_artifact(tmp_path):
+    """A generation run must produce a per-token F-trajectory JSONL artifact (the eqyk.2 logging)."""
+    e = _engine()
+    controller = DeliberationController(DeliberationConfig(enabled=True, max_iters=32))
+    _decode(e, temperature=0.0, deliberation=controller)  # greedy: deterministic, still ponders
+    assert controller.records, "the run must have pondered per token"
+    artifact = tmp_path / "deliberation_trajectory.jsonl"
+    controller.write_trajectory(artifact)
+    lines = artifact.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == len(controller.records)
+    rec = json.loads(lines[0])
+    assert {"token_index", "effort", "F_initial", "F_final", "F_drop", "halted_converged"} <= set(rec)
+    assert rec["effort"] >= 1 and rec["F_drop"] >= -1e-9
