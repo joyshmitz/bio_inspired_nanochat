@@ -309,7 +309,64 @@ def test_pulse_bias_targets_are_exactly_the_folds():
 
 
 # =========================================================================== #
-# 6. Determinism
+# 6. ε / normal-hyperbolicity + retention + slow-manifold monitor (bead 0642.2.2.2)
+# =========================================================================== #
+def test_monitor_tracks_separation_and_retention_margin():
+    lat = CuspLatch(_cfg())
+    schedule = [2.0] * 30 + [0.75] * 40  # write, then hold in the neutral band
+    traj, mon = cc.run_monitored_latch(lat, schedule, influx=torch.tensor(0.6))
+    assert len(mon.records) == len(schedule)
+    assert mon.separated_throughout(), f"ε={mon.eps:.3f} must stay separated at defaults"
+    # During the write the bias crosses a fold (margin < 0); at the hold it sits inside the wedge (>0).
+    assert mon.records[5].retention_margin < 0.0, "write pulse must cross a fold (margin < 0)"
+    assert mon.records[-1].retention_margin > 0.0, "neutral hold must sit inside the wedge (margin > 0)"
+    assert traj[-1] > 0.5, "the monitored latch must end ON after write+hold"
+
+
+def test_monitor_projector_error_is_small_on_the_manifold():
+    """Feeding the latch the influx-consistent calcium h(influx) yields ~0 reconstruction error;
+    feeding an off-manifold calcium yields a measurable error — the projector track works."""
+    lat = CuspLatch(_cfg())
+    influx = torch.tensor(0.9, dtype=torch.float64)
+    h = float(lat.quasi_steady_calcium(influx))
+    on_manifold, _ = cc.run_monitored_latch(lat, [h] * 10, influx=influx)
+    _, mon_on = cc.run_monitored_latch(lat, [h] * 10, influx=influx)
+    assert mon_on.max_projector_error() < 1e-5, "on the slow manifold the reconstruction error must vanish"
+    # An imposed calcium far from h is off-manifold ⟹ nonzero, finite reconstruction error.
+    _, mon_off = cc.run_monitored_latch(lat, [h + 0.5] * 10, influx=influx)
+    assert mon_off.max_projector_error() > 1e-3, "off-manifold calcium must register a reconstruction error"
+
+
+def test_monitor_summary_and_jsonl_are_well_formed():
+    lat = CuspLatch(_cfg())
+    _, mon = cc.run_monitored_latch(lat, [2.0] * 5 + [0.75] * 5, influx=torch.tensor(0.6))
+    s = mon.summary()
+    for key in ("steps", "eps", "separated", "delta_star", "min_retention_margin", "max_projector_error"):
+        assert key in s, f"summary missing {key}"
+    lines = mon.to_jsonl()
+    assert len(lines) == len(mon.records)
+    import json
+    rec0 = json.loads(lines[0])
+    assert {"step", "eps", "bias_b", "retention_margin", "projector_error", "certified"} <= set(rec0)
+
+
+def test_monitor_flags_loss_of_normal_hyperbolicity():
+    """A near-degenerate fast subsystem (large τ_c ⟹ ρ(M_cb) → 1) trips the gauge; the monitor's
+    assertion fires (and the latch is uncertified, so it never silently runs)."""
+    lat = CuspLatch(_cfg(latch_gamma_auto=0.45, tau_c=400.0))
+    mon = cc.CuspMonitor(lat)
+    assert not mon.separated and not lat.certified
+    with pytest.raises(AssertionError, match="normal-hyperbolicity"):
+        mon.assert_normal_hyperbolicity()
+
+
+def test_run_monitored_latch_refuses_uncertified():
+    with pytest.raises(RuntimeError, match="certified"):
+        cc.run_monitored_latch(CuspLatch(_cfg(latch_gamma_auto=0.0)), [1.0])
+
+
+# =========================================================================== #
+# 7. Determinism
 # =========================================================================== #
 def test_latch_is_deterministic():
     ca = [2.0] * 20 + [0.7] * 30

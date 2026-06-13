@@ -18,8 +18,9 @@ normal-hyperbolicity hypothesis (F1/F2) the certificate rests on.
 
 from __future__ import annotations
 
+import json
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from bio_inspired_nanochat.synaptic import SynapticConfig, cb_spectral_radius
 from bio_inspired_nanochat.torch_imports import torch
@@ -424,3 +425,151 @@ class CuspLatch:
                 break
             c, buf = c_next, buf_next
         return c
+
+
+# =========================================================================== #
+# Runtime ε / normal-hyperbolicity + retention + slow-manifold monitor (bead 0642.2.2.2)
+# =========================================================================== #
+#
+# Turns the certificate's three hypotheses into *observable* per-step evidence (the discipline the
+# metriplectic LyapunovMonitor follows for Thrust A):
+#   - ε gauge  ρ(M_cb): the fast-subsystem spectral radius — the normal-hyperbolicity (F1) margin,
+#     shared with the composition keystone (0642.10 / separation_gauge.py).
+#   - retention margin  δ* − |b(c)|: how far inside the bistable wedge the live operating point sits
+#     (R1). Positive ⟹ a latched bit is protected; negative ⟹ the drive is crossing a fold (a write
+#     or erase is in progress), which is expected during a pulse, not at a hold.
+#   - projector error  |C_live − h(influx)|: the Fenichel slow-manifold reconstruction error — how far
+#     the live calcium is from the quasi-steady manifold the reduction is performed on (§2).
+# Cheap by default: ε and the projector target are config-fixed (computed once); per-step work is the
+# O(d_v) bias and a mean. Emits rich + JSONL traces so the guarantee is auditable, not just claimed.
+
+
+@dataclass
+class CuspStepRecord:
+    """Auditable per-step record for the cusp latch's normal-hyperbolicity + retention monitors."""
+
+    step: int
+    eps: float               # ρ(M_cb), the fast-subsystem spectral radius (the ε gauge)
+    separated: bool          # ε ≤ cusp_eps_max (normal hyperbolicity F1/F2 holds)
+    bias_b: float            # live cusp bias b(c) (mean over channels)
+    delta_star: float        # certified retention half-width
+    retention_margin: float  # δ* − |b| (>0 ⟹ inside the wedge; <0 ⟹ crossing a fold, i.e. writing/erasing)
+    projector_error: float   # |C_live − h(influx)| slow-manifold reconstruction error (nan if no influx)
+    camkii_mean: float       # latch state (observability)
+    certified: bool          # the latch's standing certificate verdict
+
+
+class CuspMonitor:
+    """Per-step ε / retention / slow-manifold monitor for the cusp latch (bead 0642.2.2.2).
+
+    Accumulates `CuspStepRecord`s and exposes audit predicates + a `summary()` dict + rich/JSONL
+    traces. The ε gauge and the slow-manifold projector are config-fixed, so the monitor is cheap to
+    run every step. Pair with `run_logging.RunLogger` to fold these into the structured event stream.
+    """
+
+    def __init__(self, lat: CuspLatch) -> None:
+        self.lat = lat
+        self.eps = epsilon_gauge(lat.cfg)
+        self.separated = self.eps <= lat.cfg.cusp_eps_max
+        self.records: list[CuspStepRecord] = []
+
+    def record(self, step: int, m, ca_proxy, *, influx=None) -> CuspStepRecord:
+        """Compute (and store) one monitor record from the live latch state.
+
+        `m` is the CaMKII state, `ca_proxy` the live calcium fed to the latch. If `influx` (the calcium
+        drive that produced `ca_proxy`) is given, the slow-manifold reconstruction error is measured;
+        otherwise it is recorded as NaN (not monitored that step).
+        """
+        b = self.lat.bias_at_calcium(torch.as_tensor(ca_proxy, dtype=torch.float32))
+        b_mean = float(torch.as_tensor(b, dtype=torch.float32).mean())
+        proj_err = math.nan
+        if influx is not None:
+            h = self.lat.quasi_steady_calcium(torch.as_tensor(influx, dtype=torch.float64))
+            c_mean = float(torch.as_tensor(ca_proxy, dtype=torch.float64).mean())
+            proj_err = abs(c_mean - float(torch.as_tensor(h, dtype=torch.float64).mean()))
+        rec = CuspStepRecord(
+            step=step,
+            eps=self.eps,
+            separated=self.separated,
+            bias_b=b_mean,
+            delta_star=self.lat.delta_star,
+            retention_margin=self.lat.delta_star - abs(b_mean),
+            projector_error=proj_err,
+            camkii_mean=float(torch.as_tensor(m, dtype=torch.float32).mean()),
+            certified=self.lat.certified,
+        )
+        self.records.append(rec)
+        return rec
+
+    # -- audit predicates ----------------------------------------------------- #
+    def separated_throughout(self) -> bool:
+        """Normal hyperbolicity held: the config-level ε gauge is below the bound (and so is every
+        recorded step — ε is config-fixed, so the per-step copies just confirm it)."""
+        return self.separated and all(r.separated for r in self.records)
+
+    def max_projector_error(self) -> float:
+        errs = [r.projector_error for r in self.records if not math.isnan(r.projector_error)]
+        return max(errs) if errs else math.nan
+
+    def assert_normal_hyperbolicity(self) -> None:
+        if not self.separated:
+            raise AssertionError(
+                f"normal-hyperbolicity gauge breached: ρ(M_cb)={self.eps:.4g} > "
+                f"cusp_eps_max={self.lat.cfg.cusp_eps_max:g} — the certificate's F1/F2 hypothesis fails"
+            )
+
+    def summary(self) -> dict:
+        if not self.records:
+            return {"steps": 0, "eps": self.eps, "separated": self.separated}
+        margins = [r.retention_margin for r in self.records]
+        return {
+            "steps": len(self.records),
+            "eps": self.eps,
+            "separated": self.separated,
+            "delta_star": self.lat.delta_star,
+            "certified": self.lat.certified,
+            "min_retention_margin": min(margins),
+            "max_retention_margin": max(margins),
+            "frac_inside_wedge": sum(1 for x in margins if x > 0) / len(margins),
+            "max_projector_error": self.max_projector_error(),
+            "final_camkii_mean": self.records[-1].camkii_mean,
+        }
+
+    # -- traces --------------------------------------------------------------- #
+    def to_jsonl(self) -> list[str]:
+        """Per-step records as JSONL lines (machine-readable audit trail)."""
+        return [json.dumps(asdict(r), ensure_ascii=False) for r in self.records]
+
+    def render(self, console=None) -> None:
+        """Rich summary of the monitor trace (falls back to plain print without rich)."""
+        s = self.summary()
+        try:
+            from rich.console import Console
+            from rich.table import Table
+            console = console or Console()
+            t = Table(title="Cusp latch monitor (ε / retention / slow-manifold)")
+            t.add_column("metric")
+            t.add_column("value", justify="right")
+            for k, v in s.items():
+                t.add_row(k, f"{v:.5g}" if isinstance(v, float) else str(v))
+            console.print(t)
+        except Exception:  # pragma: no cover - rich is a project dep; stay usable without it
+            print("cusp monitor summary:", s)
+
+
+def run_monitored_latch(lat: CuspLatch, calciums, *, influx=None, m0=None):
+    """Drive the cusp latch over a calcium schedule under the monitor; return (trajectory, monitor).
+
+    `influx` (optional) is the steady calcium drive, enabling the slow-manifold reconstruction-error
+    track. Convenience harness mirroring `metriplectic_integrator.run_monitored`.
+    """
+    if not lat.certified:
+        raise RuntimeError(f"run_monitored_latch requires a certified latch ({lat.k.certificate.reason})")
+    m = torch.zeros(1) if m0 is None else m0
+    monitor = CuspMonitor(lat)
+    traj = [float(m.mean())]
+    for step, c in enumerate(calciums):
+        m, _ = lat.step(m, torch.as_tensor(c, dtype=torch.float32))
+        monitor.record(step, m, c, influx=influx)
+        traj.append(float(m.mean()))
+    return traj, monitor
